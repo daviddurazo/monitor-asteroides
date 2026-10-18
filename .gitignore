@@ -1,3 +1,6 @@
 # Contiene contraseñas y la clave de la NASA: nunca subirlo.
 .env
 __pycache__/
+
+# Ignora archivos de configuración de Visual Studio Code
+.vscode/
