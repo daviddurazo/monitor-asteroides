@@ -1,0 +1,72 @@
+name: monitor-asteroides
+
+services:
+  # Contenedor BD: almacena asteroides, acercamientos y la bitácora de ingestas.
+  mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?Define MYSQL_ROOT_PASSWORD en .env}
+      MYSQL_DATABASE: espacio
+      MYSQL_USER: nasa_ingestor
+      MYSQL_PASSWORD: ${INGESTOR_DB_PASSWORD:?Define INGESTOR_DB_PASSWORD en .env}
+      DASH_DB_PASSWORD: ${DASH_DB_PASSWORD:?Define DASH_DB_PASSWORD en .env}
+      TZ: UTC
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./mysql:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "MYSQL_PWD=\"$$MYSQL_PASSWORD\" mysql --protocol=TCP -h 127.0.0.1 -u \"$$MYSQL_USER\" \"$$MYSQL_DATABASE\" -e 'SELECT 1 FROM ingestas LIMIT 1' >/dev/null 2>&1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+    restart: unless-stopped
+
+  # Contenedor API-Ubuntu: consulta la NASA y escribe en MySQL.
+  ingestor:
+    build: ./ingestor
+    image: nasa-ingestor:local
+    environment:
+      NASA_API_KEY: ${NASA_API_KEY:-DEMO_KEY}
+      DB_HOST: mysql
+      DB_PORT: "3306"
+      DB_NAME: espacio
+      DB_USER: nasa_ingestor
+      DB_PASSWORD: ${INGESTOR_DB_PASSWORD:?Define INGESTOR_DB_PASSWORD en .env}
+      DIAS_ATRAS: "7"
+      DIAS_ADELANTE: "6"
+      INTERVALO_HORAS: "6"
+    ports:
+      - "127.0.0.1:8000:8000"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/salud"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    depends_on:
+      mysql:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # Contenedor Python-Dash: lee MySQL (solo lectura) y muestra el dashboard.
+  dash:
+    build: ./dash
+    image: dash-asteroides:local
+    ports:
+      - "127.0.0.1:8050:8050"
+    environment:
+      DB_HOST: mysql
+      DB_PORT: "3306"
+      DB_NAME: espacio
+      DB_USER: dash_lector
+      DB_PASSWORD: ${DASH_DB_PASSWORD:?Define DASH_DB_PASSWORD en .env}
+      INGESTOR_URL: http://ingestor:8000
+    depends_on:
+      mysql:
+        condition: service_healthy
+      ingestor:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  mysql_data:

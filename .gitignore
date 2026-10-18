@@ -1,0 +1,3 @@
+# Contiene contraseñas y la clave de la NASA: nunca subirlo.
+.env
+__pycache__/
