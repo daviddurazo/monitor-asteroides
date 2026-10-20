@@ -19,10 +19,24 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import pymysql
 import requests
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [ingestor] %(message)s")
+NASA_API_KEY = os.environ.get("NASA_API_KEY") or "DEMO_KEY"
+
+
+def ocultar_clave(texto):
+    """Los errores de requests incluyen la URL con api_key: la clave nunca llega a MySQL ni a los logs."""
+    return texto if NASA_API_KEY == "DEMO_KEY" else texto.replace(NASA_API_KEY, "***")
+
+
+class FormatoSinClave(logging.Formatter):
+    def format(self, registro):
+        return ocultar_clave(super().format(registro))
+
+
+manejador_log = logging.StreamHandler()
+manejador_log.setFormatter(FormatoSinClave("%(asctime)s [ingestor] %(message)s"))
+logging.basicConfig(level=logging.INFO, handlers=[manejador_log])
 log = logging.getLogger(__name__)
 
-NASA_API_KEY = os.environ.get("NASA_API_KEY") or "DEMO_KEY"
 NASA_BASE = "https://api.nasa.gov"
 DIAS_ATRAS = int(os.environ.get("DIAS_ATRAS", "7"))
 DIAS_ADELANTE = int(os.environ.get("DIAS_ADELANTE", "6"))
@@ -332,7 +346,7 @@ def ejecutar(fuente, funcion, origen):
                                  mensaje=f"{registros} registros procesados, {nuevos} nuevos")
             except Exception as error:
                 conexion.rollback()
-                mensaje = str(error)
+                mensaje = ocultar_clave(str(error))
                 if isinstance(error, requests.HTTPError) and error.response is not None \
                         and error.response.status_code == 429:
                     mensaje = "Límite de peticiones de la NASA alcanzado (HTTP 429). " \
