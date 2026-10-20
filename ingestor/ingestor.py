@@ -29,9 +29,14 @@ DIAS_ADELANTE = int(os.environ.get("DIAS_ADELANTE", "6"))
 INTERVALO_HORAS = float(os.environ.get("INTERVALO_HORAS", "6"))
 REINTENTO_MINUTOS = 15
 PUERTO = int(os.environ.get("PUERTO", "8000"))
+HORIZONS_URL = "https://ssd.jpl.nasa.gov/api/horizons.api"
+TRAYECTORIAS_N = int(os.environ.get("TRAYECTORIAS_N", "5"))
+VENTANA_HORAS = int(os.environ.get("VENTANA_HORAS", "72"))
+PASO_TRAYECTORIA = os.environ.get("PASO_TRAYECTORIA", "1h")
+# Cuerpo -> COMMAND de Horizons. El Sol da la dirección de la luz en el simulador 3D.
+CUERPOS_HORIZONS = {"asteroide": "DES={id_neo};", "luna": "301", "sol": "10"}
 
 candado = threading.Lock()
-
 
 def ahora_utc():
     return datetime.now(timezone.utc).replace(tzinfo=None)
@@ -131,6 +136,56 @@ def ingerir_neows(cursor):
     return inicio, fin, filas, contar(cursor, "acercamientos") - antes
 
 
+# --------------------------------------------------------------------------- Horizons
+
+def vectores_horizons(comando, inicio, fin):
+    """Posiciones geocéntricas (km, plano de la eclíptica) según JPL Horizons."""
+    respuesta = requests.get(HORIZONS_URL, params={
+        "format": "json", "COMMAND": f"'{comando}'", "EPHEM_TYPE": "VECTORS",
+        "CENTER": "'500@399'", "REF_PLANE": "ECLIPTIC", "VEC_TABLE": "1",
+        "CSV_FORMAT": "YES", "OUT_UNITS": "KM-S", "OBJ_DATA": "NO",
+        "START_TIME": f"'{inicio:%Y-%m-%d %H:%M}'", "STOP_TIME": f"'{fin:%Y-%m-%d %H:%M}'",
+        "STEP_SIZE": f"'{PASO_TRAYECTORIA}'"}, timeout=60)
+    respuesta.raise_for_status()
+    cuerpo = respuesta.json()
+    texto = cuerpo.get("result", "")
+    if "$$SOE" not in texto:
+        raise ValueError(f"Horizons sin vectores para {comando}: {cuerpo.get('error') or texto[:300]}")
+    filas = []
+    for linea in texto.split("$$SOE")[1].split("$$EOE")[0].strip().splitlines():
+        jd, _fecha, x, y, z = (c.strip() for c in linea.split(",")[:5])
+        # Día juliano 2451545.0 = 2000-01-01 12:00.
+        instante = datetime(2000, 1, 1, 12) + timedelta(seconds=round((float(jd) - 2451545.0) * 86400))
+        filas.append((instante, float(x), float(y), float(z)))
+    return filas
+
+
+def ingerir_trayectorias(cursor):
+    """Trayectoria de los N pasos más cercanos de los próximos 7 días a los que les falte algún cuerpo."""
+    hoy = ahora_utc().date()
+    cursor.execute("""
+        SELECT top.id, top.id_neo, top.fecha_acercamiento FROM (
+            SELECT id, id_neo, fecha_acercamiento FROM acercamientos
+            WHERE fecha_acercamiento BETWEEN UTC_TIMESTAMP() AND UTC_TIMESTAMP() + INTERVAL 7 DAY
+            ORDER BY distancia_lunar LIMIT %s
+        ) top
+        WHERE (SELECT COUNT(DISTINCT t.cuerpo) FROM trayectorias t
+               WHERE t.id_acercamiento = top.id) < %s
+    """, (TRAYECTORIAS_N, len(CUERPOS_HORIZONS)))
+    filas = nuevos = 0
+    for id_acercamiento, id_neo, fecha in cursor.fetchall():
+        inicio = fecha - timedelta(hours=VENTANA_HORAS)
+        fin = fecha + timedelta(hours=VENTANA_HORAS)
+        for cuerpo, comando in CUERPOS_HORIZONS.items():
+            vectores = vectores_horizons(comando.format(id_neo=id_neo), inicio, fin)
+            nuevos += cursor.executemany(
+                "INSERT IGNORE INTO trayectorias (id_acercamiento, cuerpo, instante, x_km, y_km, z_km) "
+                "VALUES (%s, %s, %s, %s, %s, %s)",
+                [(id_acercamiento, cuerpo, *v) for v in vectores])
+            filas += len(vectores)
+    return hoy, hoy + timedelta(days=7), filas, nuevos
+
+
 # --------------------------------------------------------------------------- Orquestación
 
 def ejecutar(fuente, funcion, origen):
@@ -176,7 +231,8 @@ def sincronizar(origen):
         return {"estado": "ocupado", "resultados": [],
                 "mensaje": "Ya hay una sincronización en curso."}
     try:
-        resultados = [ejecutar("NeoWs", ingerir_neows, origen)]
+        resultados = [ejecutar("NeoWs", ingerir_neows, origen),
+                      ejecutar("Horizons", ingerir_trayectorias, origen)]
     finally:
         candado.release()
     errores = sum(r["estado"] == "error" for r in resultados)

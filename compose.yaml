@@ -36,6 +36,10 @@ services:
       DIAS_ATRAS: "7"
       DIAS_ADELANTE: "6"
       INTERVALO_HORAS: "6"
+      # Trayectorias de JPL Horizons: N pasos más cercanos, ± horas alrededor del paso y resolución.
+      TRAYECTORIAS_N: "5"
+      VENTANA_HORAS: "72"
+      PASO_TRAYECTORIA: "1h"
     ports:
       - "127.0.0.1:8000:8000"
     healthcheck:

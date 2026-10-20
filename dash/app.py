@@ -10,9 +10,11 @@ from datetime import datetime, timedelta, timezone
 import mysql.connector
 import pandas as pd
 import plotly.graph_objects as go
-from dash import Dash, Input, Output, dash_table, dcc, html, no_update
+from dash import Dash, Input, Output, State, dash_table, dcc, html, no_update
+from flask import jsonify, send_from_directory
 
 INGESTOR_URL = os.environ.get("INGESTOR_URL", "http://ingestor:8000")
+CARPETA_SIMULADOR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "simulador")
 
 # Paleta (modo oscuro): dos categorías + tintas neutras.
 COLOR_SEGURO = "#3987e5"
@@ -33,7 +35,7 @@ server = app.server
 
 # --------------------------------------------------------------------------- Datos
 
-def consultar(sql):
+def consultar(sql, params=None):
     conexion = mysql.connector.connect(
         host=os.environ["DB_HOST"],
         port=int(os.environ.get("DB_PORT", "3306")),
@@ -44,10 +46,16 @@ def consultar(sql):
     )
     try:
         with conexion.cursor(dictionary=True) as cursor:
-            cursor.execute(sql)
+            cursor.execute(sql, params)
             return pd.DataFrame(cursor.fetchall())
     finally:
         conexion.close()
+
+
+def limpiar_nombres(datos):
+    # "(2020 QG3)" -> "2020 QG3"; los nombres numerados como "679786 (2020 QG3)" se conservan.
+    entre_parentesis = datos["nombre"].str.match(r"^\(.*\)$")
+    datos.loc[entre_parentesis, "nombre"] = datos.loc[entre_parentesis, "nombre"].str[1:-1]
 
 
 def leer_acercamientos():
@@ -58,9 +66,7 @@ def leer_acercamientos():
     """)
     if datos.empty:
         return datos
-    # "(2020 QG3)" -> "2020 QG3"; los nombres numerados como "679786 (2020 QG3)" se conservan.
-    entre_parentesis = datos["nombre"].str.match(r"^\(.*\)$")
-    datos.loc[entre_parentesis, "nombre"] = datos.loc[entre_parentesis, "nombre"].str[1:-1]
+    limpiar_nombres(datos)
     datos["es_peligroso"] = datos["es_peligroso"].astype(bool)
     datos["fecha_acercamiento"] = pd.to_datetime(datos["fecha_acercamiento"])
     # NeoWs a veces publica el mismo asteroide con dos ids (numerado y provisional): mismo
@@ -71,6 +77,48 @@ def leer_acercamientos():
                   .drop(columns="_distancia")
                   .sort_values("fecha_acercamiento", ignore_index=True))
     return datos
+
+
+def milisegundos(fecha):
+    """DATETIME en UTC (sin zona) -> milisegundos desde 1970, como los usa JavaScript."""
+    return int(fecha.replace(tzinfo=timezone.utc).timestamp() * 1000)
+
+
+def leer_trayectoria(id_acercamiento):
+    """Datos del sobrevuelo para el simulador 3D: ficha del paso y posiciones en km por cuerpo."""
+    ficha = consultar("""
+        SELECT id_neo, nombre, fecha_acercamiento, distancia_km, diametro_medio_m, es_peligroso
+        FROM vista_acercamientos WHERE id = %s
+    """, (id_acercamiento,))
+    datos = consultar("SELECT cuerpo, instante, x_km, y_km, z_km FROM trayectorias "
+                      "WHERE id_acercamiento = %s ORDER BY instante", (id_acercamiento,))
+    if ficha.empty or datos.empty:
+        return None
+    limpiar_nombres(ficha)
+    # Una fila por instante con todos los cuerpos, para que los índices coincidan en JavaScript.
+    tabla = datos.pivot(index="instante", columns="cuerpo",
+                        values=["x_km", "y_km", "z_km"]).dropna()
+
+    def posiciones(cuerpo):
+        if ("x_km", cuerpo) not in tabla:
+            return None
+        return tabla[[("x_km", cuerpo), ("y_km", cuerpo), ("z_km", cuerpo)]].values.tolist()
+
+    if posiciones("asteroide") is None or posiciones("luna") is None:
+        return None
+    paso = ficha.iloc[0]
+    return {
+        "id_neo": paso["id_neo"],
+        "nombre": paso["nombre"],
+        "fecha_ms": milisegundos(paso["fecha_acercamiento"]),
+        "distancia_km": float(paso["distancia_km"]),
+        "diametro_m": float(paso["diametro_medio_m"]),
+        "peligroso": bool(paso["es_peligroso"]),
+        "t": [milisegundos(instante) for instante in tabla.index],
+        "asteroide": posiciones("asteroide"),
+        "luna": posiciones("luna"),
+        "sol": posiciones("sol"),
+    }
 
 
 def filtrar(datos, periodo, solo_peligrosos):
@@ -324,6 +372,15 @@ app.layout = html.Div([
         ], className="acciones"),
     ], className="cabecera"),
     html.Section(id="proximo", className="proximo"),
+    panel("Simulador del sobrevuelo",
+          "Posiciones reales de JPL Horizons para los pasos más cercanos de los próximos 7 días. "
+          "Arrastra para girar, rueda para acercar. La Tierra y la Luna usan texturas de la NASA; "
+          "el asteroide es una roca genérica.",
+          html.Div([dcc.Dropdown(id="selector-trayectoria", clearable=False, searchable=False,
+                                 placeholder="Sin trayectorias todavía",
+                                 className="selector"),
+                    html.Iframe(id="simulador", src="/simulador/", className="simulador",
+                                title="Simulador 3D del sobrevuelo")])),
     html.Div([
         dcc.RadioItems(id="periodo", inline=True, value="todo", className="segmentado",
                        options=[{"label": "Todo lo guardado", "value": "todo"},
@@ -406,6 +463,58 @@ def sincronizar(_clicks):
               if r["estado"] == "ok" else f"{r['fuente']}: error — {r['mensaje']}"
               for r in cuerpo.get("resultados", [])]
     return " · ".join(partes), datetime.now(timezone.utc).isoformat()
+
+
+@app.callback(
+    Output("selector-trayectoria", "options"), Output("selector-trayectoria", "value"),
+    Input("reloj", "n_intervals"), Input("ultima-sync", "data"),
+    State("selector-trayectoria", "value"),
+)
+def opciones_trayectoria(_intervalo, _sync, actual):
+    try:
+        datos = consultar("""
+            SELECT v.id, v.nombre, v.fecha_acercamiento, v.distancia_lunar
+            FROM vista_acercamientos v
+            WHERE EXISTS (SELECT 1 FROM trayectorias t WHERE t.id_acercamiento = v.id)
+            ORDER BY v.fecha_acercamiento
+        """)
+    except mysql.connector.Error:
+        logging.exception("No se pudieron leer las trayectorias")
+        return no_update, no_update
+    if datos.empty:
+        return [], None
+    limpiar_nombres(datos)
+    opciones = [{"label": f"{f.nombre} · {f.fecha_acercamiento:%d/%m %H:%M} UTC · "
+                          f"{f.distancia_lunar:.2f} DL", "value": f.id}
+                for f in datos.itertuples()]
+    ids = [o["value"] for o in opciones]
+    # Reasignar el mismo valor reiniciaría la animación cada 30 s.
+    return opciones, no_update if actual in ids else ids[0]
+
+
+@app.callback(Output("simulador", "src"), Input("selector-trayectoria", "value"))
+def mostrar_trayectoria(id_acercamiento):
+    return "/simulador/" if id_acercamiento is None else f"/simulador/?id={id_acercamiento}"
+
+
+# --------------------------------------------------------------------------- Simulador 3D
+
+@server.route("/api/trayectoria/<int:id_acercamiento>")
+def api_trayectoria(id_acercamiento):
+    try:
+        datos = leer_trayectoria(id_acercamiento)
+    except mysql.connector.Error:
+        logging.exception("No se pudo leer la trayectoria")
+        return jsonify(error="No se pudo consultar MySQL."), 503
+    if datos is None:
+        return jsonify(error="Este acercamiento no tiene trayectoria guardada."), 404
+    return jsonify(datos)
+
+
+@server.route("/simulador/")
+@server.route("/simulador/<path:archivo>")
+def simulador(archivo="index.html"):
+    return send_from_directory(CARPETA_SIMULADOR, archivo)
 
 
 if __name__ == "__main__":

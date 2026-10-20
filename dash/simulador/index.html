@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Simulador de sobrevuelo</title>
+  <link rel="stylesheet" href="simulador.css">
+  <script type="importmap">
+    {"imports": {"three": "./vendor/three.module.min.js", "three/addons/": "./vendor/"}}
+  </script>
+  <script type="module" src="simulador.js"></script>
+</head>
+<body>
+  <canvas id="lienzo"></canvas>
+  <div id="etiquetas"></div>
+  <div id="cargando">Cargando texturas…</div>
+
+  <aside id="ficha" class="caja" hidden>
+    <span class="etiqueta-ficha">Sobrevuelo</span>
+    <h1 id="nombre"></h1>
+    <dl>
+      <dt>Máxima aproximación</dt><dd id="fecha-paso"></dd>
+      <dt>Distancia mínima</dt><dd id="distancia-min"></dd>
+      <dt>Diámetro estimado</dt><dd id="diametro"></dd>
+      <dt>Clasificación</dt><dd id="clasificacion"></dd>
+    </dl>
+  </aside>
+
+  <nav id="vistas" class="caja" hidden>
+    <div class="grupo" role="group" aria-label="Seguir con la cámara">
+      <button data-seguir="general" class="activo">General</button>
+      <button data-seguir="tierra">Tierra</button>
+      <button data-seguir="luna">Luna</button>
+      <button data-seguir="asteroide">Asteroide</button>
+    </div>
+    <label class="interruptor"><input type="checkbox" id="exagerar" checked> Tamaños exagerados</label>
+  </nav>
+
+  <footer id="tiempo" class="caja" hidden>
+    <button id="reproducir" aria-label="Pausar">❚❚</button>
+    <input id="barra" type="range" min="0" max="1000" value="0" aria-label="Instante">
+    <select id="velocidad" aria-label="Velocidad">
+      <option value="60">1 min/s</option>
+      <option value="600">10 min/s</option>
+      <option value="3600" selected>1 h/s</option>
+      <option value="21600">6 h/s</option>
+    </select>
+    <div class="lecturas">
+      <span id="ahora"></span>
+      <span id="cuenta"></span>
+      <span id="distancia"></span>
+      <span id="rapidez"></span>
+    </div>
+  </footer>
+
+  <small id="creditos">Posiciones: JPL Horizons · Texturas: NASA (Blue Marble, Black Marble, LRO, SVS Deep Star Maps) · El asteroide es una roca genérica</small>
+</body>
+</html>

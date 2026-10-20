@@ -44,6 +44,18 @@ CREATE TABLE ingestas (
     INDEX idx_inicio (inicio_ejecucion)
 );
 
+-- Trayectorias: posiciones geocéntricas (JPL Horizons) alrededor de cada acercamiento.
+CREATE TABLE trayectorias (
+    id_acercamiento  BIGINT UNSIGNED NOT NULL,
+    cuerpo           ENUM('asteroide', 'luna', 'sol') NOT NULL,
+    instante         DATETIME NOT NULL COMMENT 'TDB (~UTC + 69s)',
+    x_km             DOUBLE NOT NULL COMMENT 'Plano de la eclíptica, centro de la Tierra',
+    y_km             DOUBLE NOT NULL,
+    z_km             DOUBLE NOT NULL,
+    PRIMARY KEY (id_acercamiento, cuerpo, instante),
+    CONSTRAINT fk_trayectoria_acercamiento FOREIGN KEY (id_acercamiento) REFERENCES acercamientos (id)
+);
+
 -- Vista que consume el dashboard: une cada acercamiento con su asteroide.
 CREATE VIEW vista_acercamientos AS
 SELECT c.id, c.id_neo, a.nombre, c.fecha_acercamiento, c.velocidad_km_s,

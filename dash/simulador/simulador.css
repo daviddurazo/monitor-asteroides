@@ -1,0 +1,85 @@
+:root {
+  color-scheme: dark;
+  --caja: rgba(18, 18, 17, 0.78);
+  --caja-2: rgba(255, 255, 255, 0.08);
+  --tinta: #f0efec;
+  --tinta-2: #c3c2b7;
+  --tinta-tenue: #898781;
+  --borde: rgba(255, 255, 255, 0.12);
+  --acento: #3987e5;
+  --asteroide: #d95926;
+  --fuente: system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html, body { margin: 0; height: 100%; overflow: hidden; background: #000; }
+body { font-family: var(--fuente); color: var(--tinta); font-size: 13px; }
+
+#lienzo { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
+#etiquetas { position: fixed; inset: 0; pointer-events: none; overflow: hidden; }
+
+#cargando {
+  position: fixed; inset: 0; display: grid; place-items: center; padding: 16px;
+  color: var(--tinta-2); font-size: 15px; text-align: center; background: #000;
+}
+
+.caja {
+  position: fixed; background: var(--caja); border: 1px solid var(--borde); border-radius: 10px;
+  backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px);
+}
+
+#ficha { top: 12px; left: 12px; padding: 12px 14px; max-width: 260px; }
+.etiqueta-ficha { color: var(--tinta-tenue); font-size: 11px; text-transform: uppercase; letter-spacing: .06em; }
+#ficha h1 { font-size: 17px; margin: 2px 0 8px; }
+#ficha dl { display: grid; grid-template-columns: auto auto; gap: 3px 12px; margin: 0; }
+#ficha dt { color: var(--tinta-tenue); }
+#ficha dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; }
+
+#vistas { top: 12px; right: 12px; padding: 6px; display: flex; flex-direction: column; gap: 6px; align-items: stretch; }
+.grupo { display: flex; gap: 2px; background: var(--caja-2); border-radius: 7px; padding: 2px; }
+button, select {
+  font: inherit; color: var(--tinta-2); background: transparent; border: 0; border-radius: 6px;
+  padding: 6px 10px; cursor: pointer;
+}
+button:hover, select:hover { color: var(--tinta); }
+.grupo button.activo { background: rgba(255, 255, 255, 0.14); color: var(--tinta); font-weight: 600; }
+.interruptor { display: flex; gap: 6px; align-items: center; padding: 2px 6px 4px; color: var(--tinta-2); cursor: pointer; }
+
+#tiempo {
+  left: 12px; right: 12px; bottom: 28px; padding: 8px 10px;
+  display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center;
+}
+#reproducir { width: 36px; background: var(--acento); color: #fff; }
+#barra { flex: 1 1 200px; accent-color: var(--asteroide); min-width: 120px; }
+#velocidad { background: var(--caja-2); }
+#velocidad option { background: #1a1a19; }
+.lecturas { display: flex; flex-wrap: wrap; gap: 4px 16px; width: 100%; color: var(--tinta-2); font-variant-numeric: tabular-nums; }
+#ahora { color: var(--tinta); font-weight: 600; }
+
+#creditos { position: fixed; left: 12px; right: 12px; bottom: 8px; color: var(--tinta-tenue); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+.etiqueta {
+  position: absolute; left: 0; top: 0; white-space: nowrap; font-size: 12px; color: var(--tinta);
+  padding-left: 12px; margin-top: -8px; text-shadow: 0 0 4px #000, 0 0 2px #000;
+}
+.etiqueta::before {
+  content: ""; position: absolute; left: -4px; top: 4px; width: 8px; height: 8px;
+  border-radius: 50%; border: 1.5px solid currentColor;
+}
+.etiqueta.asteroide { color: #ff9a6e; }
+.etiqueta.luna { color: var(--tinta-2); }
+.etiqueta.tierra { color: #8cc0ff; }
+.etiqueta.sin-marca::before { display: none; }
+.etiqueta.paso { color: var(--tinta-tenue); font-size: 11px; }
+.etiqueta.paso::before { border-radius: 0; transform: rotate(45deg) scale(.7); }
+
+/* Móvil: ficha reducida al nombre (los datos clave ya salen en la barra de tiempo). */
+@media (max-width: 560px) {
+  #ficha { max-width: none; right: 12px; padding: 8px 12px; }
+  #ficha h1 { margin: 0; font-size: 15px; }
+  #ficha dl, .etiqueta-ficha { display: none; }
+  #vistas { top: 62px; left: 12px; right: auto; flex-direction: row; flex-wrap: wrap; align-items: center; }
+  #creditos { white-space: normal; font-size: 10px; }
+  #tiempo { bottom: 36px; }
+}

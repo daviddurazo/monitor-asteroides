@@ -90,6 +90,28 @@ h2 { font-size: 17px; margin: 0 0 4px; }
 .panel .dash-spreadsheet-container a { color: #7fb2f0; }
 .panel .dash-spreadsheet-container p { margin: 0; }
 
+/* Selector de trayectoria (react-select de dcc.Dropdown) en modo oscuro */
+.selector { max-width: 520px; margin-bottom: 8px; font-size: 14px; }
+.selector .Select-control {
+  background: var(--superficie-2); border: 1px solid var(--borde); border-radius: 8px;
+  color: var(--tinta); cursor: pointer;
+}
+.selector .Select-value-label, .selector .Select-value-label * { color: var(--tinta) !important; }
+.selector .Select-placeholder { color: var(--tinta-tenue); }
+.selector.is-focused .Select-control, .selector .is-focused .Select-control { border-color: var(--acento); box-shadow: none; }
+.selector .Select-menu-outer {
+  background: var(--superficie-2); border: 1px solid var(--borde); border-radius: 8px; overflow: hidden;
+}
+.selector .Select-option { background: var(--superficie-2); color: var(--tinta-2); }
+.selector .Select-option.is-focused { background: #33332f; color: var(--tinta); }
+.selector .Select-option.is-selected { color: var(--tinta); font-weight: 600; }
+
+.simulador {
+  display: block; width: 100%; height: 640px; border: 0; border-radius: 10px;
+  background: #000; margin-bottom: 10px;
+}
+@media (max-width: 560px) { .simulador { height: 560px; } }
+
 .estado { color: var(--tinta-tenue); font-size: 13px; text-align: center; }
 
 @media (max-width: 900px) {
