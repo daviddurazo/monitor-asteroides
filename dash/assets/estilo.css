@@ -90,8 +90,12 @@ h2 { font-size: 17px; margin: 0 0 4px; }
 .panel .dash-spreadsheet-container a { color: #7fb2f0; }
 .panel .dash-spreadsheet-container p { margin: 0; }
 
+.controles-simulador { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; margin-bottom: 10px; }
+/* dcc.Dropdown pone className en un div interior; el hijo del contenedor flexible es .dash-dropdown */
+.controles-simulador .dash-dropdown { flex: 1 1 320px; max-width: 560px; }
+
 /* Selector de trayectoria (react-select de dcc.Dropdown) en modo oscuro */
-.selector { max-width: 520px; margin-bottom: 8px; font-size: 14px; }
+.selector { font-size: 14px; }
 .selector .Select-control {
   background: var(--superficie-2); border: 1px solid var(--borde); border-radius: 8px;
   color: var(--tinta); cursor: pointer;

@@ -25,15 +25,36 @@ qué tan cerca pasan, qué tan grandes son y cuáles están clasificados como po
 - Endpoint: `GET https://ssd.jpl.nasa.gov/api/horizons.api` (sin clave).
 - Para los `TRAYECTORIAS_N` pasos más cercanos de los próximos 7 días, el ingestor pide la posición
   del asteroide (`COMMAND='DES=<id_neo>;'`), de la Luna (`COMMAND='301'`) y del Sol (`COMMAND='10'`)
-  respecto al centro de la Tierra, en el plano de la eclíptica, `±VENTANA_HORAS` alrededor del paso
-  y cada `PASO_TRAYECTORIA`.
+  respecto al centro de la Tierra, en el plano de la eclíptica, `±VENTANA_HORAS` alrededor del paso.
+- La resolución se adapta a cada paso: el asteroide avanza como mucho 1/10 de su distancia mínima
+  entre dos posiciones (máximo `PASO_MAX_MINUTOS`). Así los pasos lejanos usan 1 h y Apophis 8 min.
 - El `id_neo` de NeoWs es el SPK-ID del JPL, así que se usa directamente. Las horas vienen en TDB
   (~69 s respecto a UTC). La distancia mínima obtenida coincide con la que publica NeoWs.
 
-### Simulador 3D del sobrevuelo
+### Tercera fuente: JPL CAD (grandes acercamientos)
+
+- Endpoint: `GET https://ssd-api.jpl.nasa.gov/cad.api` (sin clave).
+- Pasos de los próximos `EVENTOS_ANIOS` años a menos de `EVENTOS_DIST_MAX_DL` distancias lunares
+  de asteroides con magnitud absoluta H ≤ `EVENTOS_H_MAX` (≈ 200 m o más). Con los valores por
+  defecto salen 9, entre ellos **Apophis el 13/04/2029 a 38 011 km**, más cerca que los satélites
+  geoestacionarios.
+- Si el JPL no publica el diámetro, se estima con H y un albedo de 0.14.
+- Cada evento recibe también su trayectoria de Horizons (los numerados con `COMMAND='99942;'`, los
+  provisionales con `COMMAND='DES=2024 QP2;'`).
+
+### Cuarta fuente: CNEOS Fireball (bólidos)
+
+- Endpoint: `GET https://ssd-api.jpl.nasa.gov/fireball.api?req-loc=true` (sin clave).
+- Rocas que se desintegraron en la atmósfera, detectadas por sensores del gobierno de EE. UU.: fecha,
+  ubicación, energía, altura y velocidad. Unos 900 eventos desde 1988, incluido Cheliábinsk (2013,
+  441 kt). Se recarga la serie completa en cada sincronización (una sola petición).
+
+### Simulador 3D
 
 El dashboard incluye un simulador hecho con **three.js** (`dash/simulador/`, servido por el
-propio contenedor Dash en `/simulador/` y alimentado por `/api/trayectoria/<id>`):
+propio contenedor Dash en `/simulador/` y alimentado por `/api/trayectoria/<tipo>/<id>` y
+`/api/bolidos`). Tiene tres modos: los sobrevuelos de esta semana, los grandes acercamientos y
+los bólidos.
 
 - Tierra con textura real que gira según la hora (tiempo sidéreo) e inclinada 23.4°, iluminada
   desde la posición real del Sol: lado de día, lado de noche con luces de ciudades y atmósfera.
@@ -42,7 +63,14 @@ propio contenedor Dash en `/simulador/` y alimentado por `/api/trayectoria/<id>`
 - El asteroide es una **roca genérica** (no existen imágenes de estos objetos), escalada con su
   diámetro estimado en el modo de escala real.
 - Línea de tiempo con velocidad ajustable, estela, cámara que sigue a la Tierra, la Luna o el
-  asteroide, e interruptor entre tamaños exagerados (×10) y escala real.
+  asteroide, e interruptor entre tamaños exagerados y escala real. La exageración es ×10 como
+  máximo y se reduce en los pasos muy cercanos para que la Tierra no toque la trayectoria (×2 en
+  Apophis).
+- Órbitas de referencia: la geoestacionaria y la de la ISS (esta solo es visible en escala real).
+- Bólidos sobre el globo, en su lugar exacto y girando con la Tierra; tamaño y color según la
+  energía. Al pasar el cursor (o tocar) se ven fecha, energía, coordenadas, altura y velocidad.
+- En el modo Bólidos la Tierra se ilumina según la hora actual con una fórmula aproximada de la
+  posición del Sol (error de ~0.01°).
 
 Texturas (dominio público, NASA), convertidas a JPG en `dash/simulador/texturas/`:
 Blue Marble (Earth Observatory, 73909), Black Marble 2012 (79765), nubes Blue Marble (57747),
@@ -78,7 +106,7 @@ CGI Moon Kit del LRO (SVS 4720) y Deep Star Maps 2020 (SVS 4851). three.js r160 
 
 | Contenedor | Imagen | Función |
 |---|---|---|
-| `ingestor` (API-Ubuntu) | `ubuntu:24.04` + Python | Consume NeoWs (y después JPL Horizons para las trayectorias), transforma el JSON y hace *upsert* en MySQL. Registra cada ejecución en `ingestas`. Expone una mini API HTTP para consultar su estado y lanzar una sincronización. |
+| `ingestor` (API-Ubuntu) | `ubuntu:24.04` + Python | Consume NeoWs, JPL Horizons (trayectorias), JPL CAD (grandes acercamientos) y CNEOS Fireball (bólidos), transforma el JSON y hace *upsert* en MySQL. Registra cada ejecución en `ingestas`. Expone una mini API HTTP para consultar su estado y lanzar una sincronización. |
 | `mysql` (BD) | `mysql:8.4` | Almacena los datos. El esquema se crea con `mysql/01-esquema.sql`; `mysql/02-usuarios.sh` crea el usuario de solo lectura del dashboard. |
 | `dash` (Python-Dash) | `python:3.12-slim` | Lee MySQL cada 30 s y muestra indicadores, gráficas y tablas. Su botón llama al ingestor por la red interna. |
 
@@ -110,6 +138,18 @@ actualizado                  UNIQUE(id_neo,         mensaje
                                      luna|sol)      │
                              instante  ────────────┘
                              x_km, y_km, z_km
+
+eventos (1) ────────< (N) trayectorias_eventos       bolidos
+─────────────────────     ──────────────────────     ─────────────────────
+id  PK                    id_evento  FK ─┐           fecha     ─┐
+designacion               cuerpo         ├ PK        latitud    ├ PK
+nombre                    instante  ─────┘           longitud  ─┘
+fecha_acercamiento        x_km, y_km, z_km           energia_impacto_kt
+distancia_km                                         energia_radiada_j
+velocidad_km_s                                       altitud_km
+magnitud_absoluta                                    velocidad_km_s
+diametro_m, diametro_estimado
+UNIQUE(designacion, fecha_acercamiento)
 ```
 
 - **asteroides**: catálogo, un registro por objeto. **acercamientos**: un registro por paso
@@ -120,6 +160,9 @@ actualizado                  UNIQUE(id_neo,         mensaje
   de cada paso. Cuelga de `acercamientos.id` (no de `id_neo`) porque un asteroide puede tener varios
   pasos, y guarda la Luna y el Sol por acercamiento para que coincidan instante a instante. Su clave primaria
   hace la carga idempotente (`INSERT IGNORE`).
+- **eventos** y **trayectorias_eventos**: grandes acercamientos de la API CAD. Van aparte de
+  `asteroides`/`acercamientos` para no mezclar pasos de 2029 con los indicadores semanales de NeoWs.
+- **bolidos**: la clave `(fecha, latitud, longitud)` permite recargar la serie sin duplicar.
 - **vista_acercamientos** une ambas tablas y calcula el diámetro medio; es lo que lee el dashboard.
 - Dos usuarios con mínimo privilegio: `nasa_ingestor` (escritura) y `dash_lector` (solo `SELECT`).
 - Todas las fechas se guardan en **UTC**.
@@ -163,8 +206,9 @@ luego repite cada 6 horas.
    SELECT inicio_ejecucion, origen, registros, nuevos, estado FROM ingestas ORDER BY id DESC;
    exit;
    ```
-3. **Visualización** — En el dashboard: el próximo paso cercano, el **simulador 3D** del sobrevuelo
-   (elige el asteroide, sigue a la Tierra, la Luna o el asteroide y mueve la línea de tiempo), los indicadores, los filtros (últimos/próximos 7 días,
+3. **Visualización** — En el dashboard: el próximo paso cercano, el **simulador 3D** (en «Grandes
+   acercamientos» elige Apophis, mueve la línea de tiempo al centro y sigue a la Tierra para verlo
+   cruzar la órbita geoestacionaria; en «Bólidos» pasa el cursor por el punto de Cheliábinsk), los indicadores, los filtros (últimos/próximos 7 días,
    solo peligrosos), las gráficas con *hover* y la tabla de pasos más cercanos.
 4. **Integración** — Pulsa **Sincronizar con la NASA**: el contenedor Dash llama al ingestor, este
    consulta la NASA, guarda en MySQL y aparece una nueva fila en la *Bitácora de ingestas*
@@ -191,9 +235,10 @@ docker compose down -v               # elimina también el volumen de MySQL (bor
   `DEMO_KEY`. Pon tu clave en `.env` y ejecuta `docker compose up -d` (recrea el ingestor).
 - **Access denied tras editar `.env`**: las contraseñas de MySQL solo se aplican al crear el
   volumen. Usa `docker compose down -v` y vuelve a levantar (se pierden los datos guardados).
-- **`Table 'espacio.trayectorias' doesn't exist`**: el volumen de MySQL se creó antes de añadir esa
-  tabla y los scripts de `mysql/` solo corren con el volumen vacío. Ejecuta a mano el `CREATE TABLE
-  trayectorias` de `mysql/01-esquema.sql`, o usa `docker compose down -v` (borra los datos).
+- **`Table 'espacio.trayectorias' doesn't exist`** (o `eventos`, `trayectorias_eventos`, `bolidos`):
+  el volumen de MySQL se creó antes de añadir esas tablas y los scripts de `mysql/` solo corren con
+  el volumen vacío. Ejecuta a mano los `CREATE TABLE` que falten de `mysql/01-esquema.sql`, o usa
+  `docker compose down -v` (borra los datos).
 - **`Data truncated for column 'cuerpo'`** en la ingesta de Horizons: la tabla se creó antes de
   añadir el Sol. Ejecuta `ALTER TABLE trayectorias MODIFY cuerpo ENUM('asteroide', 'luna', 'sol') NOT NULL;`
   y sincroniza; el ingestor completa solo los acercamientos a los que les falte algún cuerpo.

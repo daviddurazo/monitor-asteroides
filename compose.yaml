@@ -36,10 +36,15 @@ services:
       DIAS_ATRAS: "7"
       DIAS_ADELANTE: "6"
       INTERVALO_HORAS: "6"
-      # Trayectorias de JPL Horizons: N pasos más cercanos, ± horas alrededor del paso y resolución.
+      # Trayectorias de JPL Horizons: N pasos más cercanos, ± horas alrededor del paso y
+      # resolución máxima (se afina sola en los pasos muy cercanos).
       TRAYECTORIAS_N: "5"
       VENTANA_HORAS: "72"
-      PASO_TRAYECTORIA: "1h"
+      PASO_MAX_MINUTOS: "60"
+      # Grandes acercamientos (API CAD): años hacia adelante, distancia máxima (DL) y H máxima.
+      EVENTOS_ANIOS: "10"
+      EVENTOS_DIST_MAX_DL: "5"
+      EVENTOS_H_MAX: "21"
     ports:
       - "127.0.0.1:8000:8000"
     healthcheck:

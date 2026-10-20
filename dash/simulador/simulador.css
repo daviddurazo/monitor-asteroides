@@ -35,6 +35,13 @@ body { font-family: var(--fuente); color: var(--tinta); font-size: 13px; }
 #ficha dl { display: grid; grid-template-columns: auto auto; gap: 3px 12px; margin: 0; }
 #ficha dt { color: var(--tinta-tenue); }
 #ficha dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; }
+#ficha .nota { margin: 8px 0 0; color: #ffb38f; line-height: 1.4; }
+
+#tooltip {
+  left: 0; top: 0; padding: 8px 10px; pointer-events: none; max-width: 260px;
+  font-variant-numeric: tabular-nums; line-height: 1.45; color: var(--tinta-2);
+}
+#tooltip div:first-child { color: var(--tinta); font-weight: 600; }
 
 #vistas { top: 12px; right: 12px; padding: 6px; display: flex; flex-direction: column; gap: 6px; align-items: stretch; }
 .grupo { display: flex; gap: 2px; background: var(--caja-2); border-radius: 7px; padding: 2px; }
@@ -72,6 +79,9 @@ button:hover, select:hover { color: var(--tinta); }
 .etiqueta.tierra { color: #8cc0ff; }
 .etiqueta.sin-marca::before { display: none; }
 .etiqueta.paso { color: var(--tinta-tenue); font-size: 11px; }
+.etiqueta.orbita { color: #7fb2f0; font-size: 11px; }
+.etiqueta.orbita::before { width: 4px; height: 4px; left: -2px; top: 6px; background: currentColor; }
+.etiqueta.bolido { color: #ff8a55; font-size: 11px; }
 .etiqueta.paso::before { border-radius: 0; transform: rotate(45deg) scale(.7); }
 
 /* Móvil: ficha reducida al nombre (los datos clave ya salen en la barra de tiempo). */

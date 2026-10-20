@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Simulador de sobrevuelo</title>
+  <title>Simulador 3D</title>
   <link rel="stylesheet" href="simulador.css">
   <script type="importmap">
     {"imports": {"three": "./vendor/three.module.min.js", "three/addons/": "./vendor/"}}
@@ -16,24 +16,22 @@
   <div id="cargando">Cargando texturas…</div>
 
   <aside id="ficha" class="caja" hidden>
-    <span class="etiqueta-ficha">Sobrevuelo</span>
+    <span class="etiqueta-ficha" id="tipo-ficha"></span>
     <h1 id="nombre"></h1>
-    <dl>
-      <dt>Máxima aproximación</dt><dd id="fecha-paso"></dd>
-      <dt>Distancia mínima</dt><dd id="distancia-min"></dd>
-      <dt>Diámetro estimado</dt><dd id="diametro"></dd>
-      <dt>Clasificación</dt><dd id="clasificacion"></dd>
-    </dl>
+    <dl id="datos-ficha"></dl>
+    <p id="nota-ficha" class="nota" hidden></p>
   </aside>
 
   <nav id="vistas" class="caja" hidden>
-    <div class="grupo" role="group" aria-label="Seguir con la cámara">
+    <div class="grupo" id="botones-seguir" role="group" aria-label="Seguir con la cámara">
       <button data-seguir="general" class="activo">General</button>
       <button data-seguir="tierra">Tierra</button>
       <button data-seguir="luna">Luna</button>
       <button data-seguir="asteroide">Asteroide</button>
     </div>
-    <label class="interruptor"><input type="checkbox" id="exagerar" checked> Tamaños exagerados</label>
+    <label class="interruptor" id="control-exagerar"><input type="checkbox" id="exagerar" checked> <span id="texto-exagerar">Tamaños exagerados</span></label>
+    <label class="interruptor"><input type="checkbox" id="ver-bolidos" checked> Bólidos</label>
+    <label class="interruptor"><input type="checkbox" id="ver-orbitas" checked> Órbitas de satélites</label>
   </nav>
 
   <footer id="tiempo" class="caja" hidden>
@@ -53,6 +51,8 @@
     </div>
   </footer>
 
-  <small id="creditos">Posiciones: JPL Horizons · Texturas: NASA (Blue Marble, Black Marble, LRO, SVS Deep Star Maps) · El asteroide es una roca genérica</small>
+  <div id="tooltip" class="caja" hidden></div>
+
+  <small id="creditos">Posiciones: JPL Horizons · Bólidos: CNEOS · Texturas: NASA (Blue Marble, Black Marble, LRO, SVS Deep Star Maps) · El asteroide es una roca genérica</small>
 </body>
 </html>

@@ -30,13 +30,22 @@ INTERVALO_HORAS = float(os.environ.get("INTERVALO_HORAS", "6"))
 REINTENTO_MINUTOS = 15
 PUERTO = int(os.environ.get("PUERTO", "8000"))
 HORIZONS_URL = "https://ssd.jpl.nasa.gov/api/horizons.api"
+JPL_SSD_API = "https://ssd-api.jpl.nasa.gov"
+UA_KM = 149_597_870.7
 TRAYECTORIAS_N = int(os.environ.get("TRAYECTORIAS_N", "5"))
 VENTANA_HORAS = int(os.environ.get("VENTANA_HORAS", "72"))
-PASO_TRAYECTORIA = os.environ.get("PASO_TRAYECTORIA", "1h")
-# Cuerpo -> COMMAND de Horizons. El Sol da la dirección de la luz en el simulador 3D.
-CUERPOS_HORIZONS = {"asteroide": "DES={id_neo};", "luna": "301", "sol": "10"}
+PASO_MAX_MINUTOS = int(os.environ.get("PASO_MAX_MINUTOS", "60"))
+# Grandes acercamientos (API CAD): años hacia adelante, distancia máxima y magnitud H máxima
+# (H <= 21 equivale a unos 200 m de diámetro o más).
+EVENTOS_ANIOS = int(os.environ.get("EVENTOS_ANIOS", "10"))
+EVENTOS_DIST_MAX_DL = float(os.environ.get("EVENTOS_DIST_MAX_DL", "5"))
+EVENTOS_H_MAX = float(os.environ.get("EVENTOS_H_MAX", "21"))
+# Cuerpos que acompañan a cada asteroide -> COMMAND de Horizons. El Sol da la luz del simulador.
+CUERPOS_FIJOS = {"luna": "301", "sol": "10"}
+CUERPOS_POR_TRAYECTORIA = 1 + len(CUERPOS_FIJOS)
 
 candado = threading.Lock()
+
 
 def ahora_utc():
     return datetime.now(timezone.utc).replace(tzinfo=None)
@@ -63,6 +72,23 @@ def pedir(ruta, params):
              respuesta.status_code, respuesta.headers.get("X-RateLimit-Remaining", "?"))
     respuesta.raise_for_status()
     return respuesta.json()
+
+
+def pedir_jpl(ruta, params):
+    """GET a las APIs del Solar System Dynamics del JPL (sin clave)."""
+    respuesta = requests.get(f"{JPL_SSD_API}{ruta}", params=params, timeout=60)
+    log.info("GET %s %s -> HTTP %s", ruta, params, respuesta.status_code)
+    respuesta.raise_for_status()
+    return respuesta.json()
+
+
+def desde_dia_juliano(jd):
+    """Día juliano -> datetime (2451545.0 = 2000-01-01 12:00), redondeado al segundo."""
+    return datetime(2000, 1, 1, 12) + timedelta(seconds=round((float(jd) - 2451545.0) * 86400))
+
+
+def opcional(valor):
+    return None if valor is None else float(valor)
 
 
 def tramos(inicio, fin, max_dias=7):
@@ -138,14 +164,14 @@ def ingerir_neows(cursor):
 
 # --------------------------------------------------------------------------- Horizons
 
-def vectores_horizons(comando, inicio, fin):
+def vectores_horizons(comando, inicio, fin, paso):
     """Posiciones geocéntricas (km, plano de la eclíptica) según JPL Horizons."""
     respuesta = requests.get(HORIZONS_URL, params={
         "format": "json", "COMMAND": f"'{comando}'", "EPHEM_TYPE": "VECTORS",
         "CENTER": "'500@399'", "REF_PLANE": "ECLIPTIC", "VEC_TABLE": "1",
         "CSV_FORMAT": "YES", "OUT_UNITS": "KM-S", "OBJ_DATA": "NO",
         "START_TIME": f"'{inicio:%Y-%m-%d %H:%M}'", "STOP_TIME": f"'{fin:%Y-%m-%d %H:%M}'",
-        "STEP_SIZE": f"'{PASO_TRAYECTORIA}'"}, timeout=60)
+        "STEP_SIZE": f"'{paso}'"}, timeout=60)
     respuesta.raise_for_status()
     cuerpo = respuesta.json()
     texto = cuerpo.get("result", "")
@@ -154,36 +180,137 @@ def vectores_horizons(comando, inicio, fin):
     filas = []
     for linea in texto.split("$$SOE")[1].split("$$EOE")[0].strip().splitlines():
         jd, _fecha, x, y, z = (c.strip() for c in linea.split(",")[:5])
-        # Día juliano 2451545.0 = 2000-01-01 12:00.
-        instante = datetime(2000, 1, 1, 12) + timedelta(seconds=round((float(jd) - 2451545.0) * 86400))
-        filas.append((instante, float(x), float(y), float(z)))
+        filas.append((desde_dia_juliano(jd), float(x), float(y), float(z)))
     return filas
+
+
+def paso_minutos(distancia_km, velocidad_km_s):
+    """Resolución: el asteroide avanza como mucho 1/10 de su distancia mínima por paso, para que
+    la curva de los pasos muy cercanos (como Apophis en 2029) no salga en tramos rectos."""
+    return int(max(1, min(PASO_MAX_MINUTOS, distancia_km / velocidad_km_s / 10 / 60)))
+
+
+def guardar_trayectoria(cursor, tabla, columna, id_ref, comando, fecha, distancia_km,
+                        velocidad_km_s):
+    """Pide a Horizons el asteroide, la Luna y el Sol alrededor de `fecha` y los guarda."""
+    inicio = fecha - timedelta(hours=VENTANA_HORAS)
+    fin = fecha + timedelta(hours=VENTANA_HORAS)
+    paso = f"{paso_minutos(distancia_km, velocidad_km_s)}m"
+    filas = nuevos = 0
+    for cuerpo, comando_cuerpo in {"asteroide": comando, **CUERPOS_FIJOS}.items():
+        vectores = vectores_horizons(comando_cuerpo, inicio, fin, paso)
+        nuevos += cursor.executemany(
+            f"INSERT IGNORE INTO {tabla} ({columna}, cuerpo, instante, x_km, y_km, z_km) "
+            "VALUES (%s, %s, %s, %s, %s, %s)",
+            [(id_ref, cuerpo, *v) for v in vectores])
+        filas += len(vectores)
+    return filas, nuevos
 
 
 def ingerir_trayectorias(cursor):
     """Trayectoria de los N pasos más cercanos de los próximos 7 días a los que les falte algún cuerpo."""
     hoy = ahora_utc().date()
     cursor.execute("""
-        SELECT top.id, top.id_neo, top.fecha_acercamiento FROM (
-            SELECT id, id_neo, fecha_acercamiento FROM acercamientos
+        SELECT top.id, top.id_neo, top.fecha_acercamiento, top.distancia_km, top.velocidad_km_s
+        FROM (
+            SELECT id, id_neo, fecha_acercamiento, distancia_km, velocidad_km_s FROM acercamientos
             WHERE fecha_acercamiento BETWEEN UTC_TIMESTAMP() AND UTC_TIMESTAMP() + INTERVAL 7 DAY
             ORDER BY distancia_lunar LIMIT %s
         ) top
         WHERE (SELECT COUNT(DISTINCT t.cuerpo) FROM trayectorias t
                WHERE t.id_acercamiento = top.id) < %s
-    """, (TRAYECTORIAS_N, len(CUERPOS_HORIZONS)))
+    """, (TRAYECTORIAS_N, CUERPOS_POR_TRAYECTORIA))
     filas = nuevos = 0
-    for id_acercamiento, id_neo, fecha in cursor.fetchall():
-        inicio = fecha - timedelta(hours=VENTANA_HORAS)
-        fin = fecha + timedelta(hours=VENTANA_HORAS)
-        for cuerpo, comando in CUERPOS_HORIZONS.items():
-            vectores = vectores_horizons(comando.format(id_neo=id_neo), inicio, fin)
-            nuevos += cursor.executemany(
-                "INSERT IGNORE INTO trayectorias (id_acercamiento, cuerpo, instante, x_km, y_km, z_km) "
-                "VALUES (%s, %s, %s, %s, %s, %s)",
-                [(id_acercamiento, cuerpo, *v) for v in vectores])
-            filas += len(vectores)
+    for id_acercamiento, id_neo, fecha, distancia_km, velocidad_km_s in cursor.fetchall():
+        # El id de NeoWs es el SPK-ID del JPL.
+        f, n = guardar_trayectoria(cursor, "trayectorias", "id_acercamiento", id_acercamiento,
+                                   f"DES={id_neo};", fecha, distancia_km, velocidad_km_s)
+        filas, nuevos = filas + f, nuevos + n
     return hoy, hoy + timedelta(days=7), filas, nuevos
+
+
+# --------------------------------------------------------------------------- CAD (grandes acercamientos)
+
+def diametro_desde_h(h, albedo=0.14):
+    """Diámetro estimado en metros a partir de la magnitud absoluta H (fórmula estándar del JPL)."""
+    return 1329 / albedo ** 0.5 * 10 ** (-h / 5) * 1000
+
+
+def comando_designacion(designacion):
+    """Numerados como "99942;"; provisionales como "DES=2024 QP2;"."""
+    return f"{designacion};" if designacion.isdigit() else f"DES={designacion};"
+
+
+def ingerir_eventos(cursor):
+    """Pasos de asteroides grandes a pocas distancias lunares en los próximos años (API CAD),
+    y su trayectoria de Horizons. Todos son potencialmente peligrosos: H <= 22 y MOID <= 0.05 UA."""
+    hoy = ahora_utc().date()
+    fin = hoy + timedelta(days=round(365.25 * EVENTOS_ANIOS))
+    datos = pedir_jpl("/cad.api", {
+        "date-min": hoy.isoformat(), "date-max": fin.isoformat(),
+        "dist-max": f"{EVENTOS_DIST_MAX_DL}LD", "h-max": EVENTOS_H_MAX,
+        "sort": "dist", "fullname": "true", "diameter": "true"})
+    antes = contar(cursor, "eventos")
+    registros = 0
+    for valores in datos.get("data", []):
+        e = dict(zip(datos["fields"], valores))
+        h = float(e["h"])
+        cursor.execute("""
+            INSERT INTO eventos (designacion, nombre, fecha_acercamiento, distancia_km,
+                                 velocidad_km_s, magnitud_absoluta, diametro_m, diametro_estimado)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s) AS nuevo
+            ON DUPLICATE KEY UPDATE
+                nombre = nuevo.nombre, distancia_km = nuevo.distancia_km,
+                velocidad_km_s = nuevo.velocidad_km_s, magnitud_absoluta = nuevo.magnitud_absoluta,
+                diametro_m = nuevo.diametro_m, diametro_estimado = nuevo.diametro_estimado
+        """, (e["des"], e["fullname"].strip(), desde_dia_juliano(e["jd"]),
+              float(e["dist"]) * UA_KM, float(e["v_rel"]), h,
+              float(e["diameter"]) * 1000 if e["diameter"] else diametro_desde_h(h),
+              e["diameter"] is None))
+        registros += 1
+    cursor.execute("""
+        SELECT id, designacion, fecha_acercamiento, distancia_km, velocidad_km_s FROM eventos e
+        WHERE fecha_acercamiento >= UTC_TIMESTAMP()
+          AND (SELECT COUNT(DISTINCT t.cuerpo) FROM trayectorias_eventos t
+               WHERE t.id_evento = e.id) < %s
+    """, (CUERPOS_POR_TRAYECTORIA,))
+    posiciones = 0
+    for id_evento, designacion, fecha, distancia_km, velocidad_km_s in cursor.fetchall():
+        posiciones += guardar_trayectoria(cursor, "trayectorias_eventos", "id_evento", id_evento,
+                                          comando_designacion(designacion), fecha, distancia_km,
+                                          velocidad_km_s)[1]
+    log.info("CAD: %s posiciones nuevas de Horizons para los eventos", posiciones)
+    return hoy, fin, registros, contar(cursor, "eventos") - antes
+
+
+# --------------------------------------------------------------------------- Fireball (bólidos)
+
+def ingerir_bolidos(cursor):
+    """Bólidos con ubicación conocida (API Fireball de CNEOS): toda la serie histórica."""
+    datos = pedir_jpl("/fireball.api", {"req-loc": "true"})
+    filas = []
+    for valores in datos.get("data", []):
+        b = dict(zip(datos["fields"], valores))
+        filas.append((b["date"],
+                      float(b["lat"]) * (1 if b["lat-dir"] == "N" else -1),
+                      float(b["lon"]) * (1 if b["lon-dir"] == "E" else -1),
+                      opcional(b["impact-e"]), float(b["energy"]) * 1e10,
+                      opcional(b["alt"]), opcional(b["vel"])))
+    if not filas:
+        return None, None, 0, 0
+    antes = contar(cursor, "bolidos")
+    cursor.executemany("""
+        INSERT INTO bolidos (fecha, latitud, longitud, energia_impacto_kt, energia_radiada_j,
+                             altitud_km, velocidad_km_s)
+        VALUES (%s, %s, %s, %s, %s, %s, %s) AS nuevo
+        ON DUPLICATE KEY UPDATE
+            latitud = nuevo.latitud, longitud = nuevo.longitud,
+            energia_impacto_kt = nuevo.energia_impacto_kt,
+            energia_radiada_j = nuevo.energia_radiada_j,
+            altitud_km = nuevo.altitud_km, velocidad_km_s = nuevo.velocidad_km_s
+    """, filas)
+    fechas = sorted(f[0][:10] for f in filas)
+    return fechas[0], fechas[-1], len(filas), contar(cursor, "bolidos") - antes
 
 
 # --------------------------------------------------------------------------- Orquestación
@@ -232,7 +359,9 @@ def sincronizar(origen):
                 "mensaje": "Ya hay una sincronización en curso."}
     try:
         resultados = [ejecutar("NeoWs", ingerir_neows, origen),
-                      ejecutar("Horizons", ingerir_trayectorias, origen)]
+                      ejecutar("Horizons", ingerir_trayectorias, origen),
+                      ejecutar("CAD", ingerir_eventos, origen),
+                      ejecutar("Fireball", ingerir_bolidos, origen)]
     finally:
         candado.release()
     errores = sum(r["estado"] == "error" for r in resultados)

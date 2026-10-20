@@ -1,6 +1,9 @@
-// Simulador 3D del sobrevuelo: posiciones reales de JPL Horizons (guardadas en MySQL por el
-// ingestor) y texturas de la NASA para la Tierra, la Luna y el cielo. El asteroide es una roca
-// genérica: no existen imágenes de estos objetos.
+// Simulador 3D: sobrevuelos con posiciones reales de JPL Horizons (guardadas en MySQL por el
+// ingestor) y bólidos de CNEOS sobre el globo. Texturas de la NASA para la Tierra, la Luna y el
+// cielo. El asteroide es una roca genérica: no existen imágenes de estos objetos.
+//
+// Vistas:  ?tipo=acercamiento|evento&id=N  -> sobrevuelo
+//          ?vista=bolidos                  -> solo la Tierra con los bólidos, a la hora actual
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/OrbitControls.js';
 
@@ -8,28 +11,33 @@ import { OrbitControls } from 'three/addons/OrbitControls.js';
 // que devuelve Horizons), con +z hacia el norte de la eclíptica.
 const KM = 1 / 1000;
 const DL_KM = 384400;
+const UA_KM = 149597870.7;
 const R_TIERRA_KM = 6371;
 const R_LUNA_KM = 1737.4;
 const R_SOL_KM = 696000;
-const EXAGERACION = 10;             // Tierra y Luna en modo "tamaños exagerados"
-const R_ASTEROIDE_EXAGERADO = 12;   // unidades de escena (12 000 km)
+const R_GEO_KM = 42164;                  // órbita geoestacionaria (35 786 km de altura)
+const R_ISS_KM = R_TIERRA_KM + 420;
+const INCLINACION_ISS = THREE.MathUtils.degToRad(51.64);
+const EXAGERACION_MAX = 10;              // Tierra y Luna en modo "tamaños exagerados"
+const HIROSHIMA_KT = 15;
 const OBLICUIDAD = THREE.MathUtils.degToRad(23.4392911);
 const NORTE_ECLIPTICA = new THREE.Vector3(0, 0, 1);
 
 const $ = (selector) => document.querySelector(selector);
-const id = new URLSearchParams(location.search).get('id');
+const parametros = new URLSearchParams(location.search);
+const vista = parametros.get('vista') === 'bolidos' ? 'bolidos' : parametros.has('id') ? 'sobrevuelo' : null;
 
 function avisar(texto) {
   $('#cargando').textContent = texto;
   $('#cargando').hidden = false;
 }
 
-if (!id) {
+if (!vista) {
   avisar('Elige un asteroide en el selector para ver su sobrevuelo.');
 } else {
   iniciar().catch((error) => {
     console.error(error);
-    avisar('No se pudo cargar el sobrevuelo. Revisa que el dashboard pueda leer MySQL.');
+    avisar('No se pudo cargar el simulador. Revisa que el dashboard pueda leer MySQL.');
   });
 }
 
@@ -37,6 +45,12 @@ if (!id) {
 
 const numero = new Intl.NumberFormat('es-MX', { maximumFractionDigits: 0 });
 const fechaUTC = (ms) => new Date(ms).toISOString().slice(0, 16).replace('T', ' ') + ' UTC';
+
+async function obtener(url) {
+  const respuesta = await fetch(url);
+  if (!respuesta.ok) throw new Error(`${url}: HTTP ${respuesta.status}`);
+  return respuesta.json();
+}
 
 function cuentaAtras(ms) {
   const minutos = Math.round(Math.abs(ms) / 60000);
@@ -53,6 +67,20 @@ function anguloSideral(ms) {
   return THREE.MathUtils.degToRad((280.46061837 + 360.98564736629 * dias) % 360);
 }
 
+/**
+ * Posición geocéntrica aproximada del Sol (unidades de escena, eclíptica J2000), con un error
+ * de ~0.01°. Se usa cuando no hay posiciones de Horizons (vista de bólidos).
+ */
+function posicionSol(ms, destino) {
+  const n = ms / 86400000 + 2440587.5 - 2451545.0;
+  const g = THREE.MathUtils.degToRad(357.528 + 0.9856003 * n);
+  // Longitud del equinoccio de la fecha menos la precesión acumulada desde J2000.
+  const longitud = THREE.MathUtils.degToRad(280.460 + 0.9856474 * n + 1.915 * Math.sin(g)
+    + 0.020 * Math.sin(2 * g) - 3.825e-5 * n);
+  const distancia = (1.00014 - 0.01671 * Math.cos(g) - 0.00014 * Math.cos(2 * g)) * UA_KM * KM;
+  return destino.set(distancia * Math.cos(longitud), distancia * Math.sin(longitud), 0);
+}
+
 function aleatorio(semilla) {
   let a = semilla >>> 0;
   return () => {
@@ -63,7 +91,7 @@ function aleatorio(semilla) {
   };
 }
 
-/** Roca irregular y reproducible a partir del id del asteroide. */
+/** Roca irregular y reproducible a partir de la designación del asteroide. */
 function geometriaRoca(semilla) {
   const azar = aleatorio(semilla);
   const geometria = new THREE.IcosahedronGeometry(1, 5);
@@ -99,6 +127,24 @@ function texturaResplandor() {
   const textura = new THREE.CanvasTexture(lienzo);
   textura.colorSpace = THREE.SRGBColorSpace;
   return textura;
+}
+
+/** Circunferencia en el plano XY local. */
+function anillo(radio, color, opacidad) {
+  const puntos = Array.from({ length: 181 }, (_, i) => {
+    const a = (i / 180) * Math.PI * 2;
+    return new THREE.Vector3(Math.cos(a) * radio, Math.sin(a) * radio, 0);
+  });
+  return new THREE.Line(new THREE.BufferGeometry().setFromPoints(puntos),
+    new THREE.LineBasicMaterial({ color, transparent: true, opacity: opacidad, depthWrite: false }));
+}
+
+/** Punto de la superficie (radio 1) en el marco de la Tierra: longitud 0 en +x, norte en +z. */
+function puntoGeografico(latitud, longitud, radio = 1) {
+  const la = THREE.MathUtils.degToRad(latitud);
+  const lo = THREE.MathUtils.degToRad(longitud);
+  return new THREE.Vector3(Math.cos(la) * Math.cos(lo), Math.cos(la) * Math.sin(lo), Math.sin(la))
+    .multiplyScalar(radio);
 }
 
 // Tierra: textura de día iluminada por el Sol, luces de ciudades en el lado nocturno y
@@ -147,9 +193,12 @@ const SOMBREADOR_TIERRA = {
 // --------------------------------------------------------------------------- Escena
 
 async function iniciar() {
-  const respuesta = await fetch(`/api/trayectoria/${encodeURIComponent(id)}`);
-  if (!respuesta.ok) throw new Error(`HTTP ${respuesta.status}`);
-  const datos = await respuesta.json();
+  const tipo = parametros.get('tipo') === 'evento' ? 'evento' : 'acercamiento';
+  const [vuelo, bolidos] = await Promise.all([
+    vista === 'sobrevuelo' ? obtener(`/api/trayectoria/${tipo}/${encodeURIComponent(parametros.get('id'))}`) : null,
+    // Sin bólidos el simulador sigue funcionando.
+    obtener('/api/bolidos').catch((error) => { console.warn(error); return []; }),
+  ]);
 
   const lienzo = $('#lienzo');
   const renderer = new THREE.WebGLRenderer({ canvas: lienzo, antialias: true, logarithmicDepthBuffer: true });
@@ -167,7 +216,7 @@ async function iniciar() {
     const { clientWidth: ancho, clientHeight: alto } = lienzo;
     let arriba = 0;
     let abajo = alto;
-    for (const caja of document.querySelectorAll('.caja:not([hidden])')) {
+    for (const caja of document.querySelectorAll('.caja:not([hidden]):not(#tooltip)')) {
       const r = caja.getBoundingClientRect();
       if (r.width < ancho * 0.5) continue;
       if (r.top + r.height / 2 < alto / 2) arriba = Math.max(arriba, r.bottom);
@@ -230,13 +279,49 @@ async function iniciar() {
   ejeTierra.add(tierra);
   escena.add(ejeTierra);
 
+  // Órbitas de referencia en el plano del ecuador (no giran con la Tierra).
+  const anilloGeo = anillo(R_GEO_KM * KM, 0x7fb2f0, 0.55);
+  const anilloIss = anillo(R_ISS_KM * KM, 0xc3c2b7, 0.6);
+  anilloIss.rotation.x = INCLINACION_ISS;
+  ejeTierra.add(anilloGeo, anilloIss);
+  ejeTierra.updateMatrixWorld(true);
+  const puntoGeo = anilloGeo.localToWorld(new THREE.Vector3(R_GEO_KM * KM, 0, 0));
+  const puntoIss = anilloIss.localToWorld(new THREE.Vector3(0, R_ISS_KM * KM, 0));
+
+  // Bólidos: esferas en la superficie, hijas de la Tierra para que giren con ella. Tamaño y color
+  // según la energía (escala logarítmica).
+  const maxKt = Math.max(1, ...bolidos.map((b) => b[3] ?? 0));
+  const fuerza = (kt) => Math.log10(1 + (kt ?? 0.05) * 10) / Math.log10(1 + maxKt * 10);
+  const mallaBolidos = new THREE.InstancedMesh(new THREE.SphereGeometry(1, 12, 8),
+    new THREE.MeshBasicMaterial({ color: 0xffffff }), Math.max(1, bolidos.length));
+  mallaBolidos.count = bolidos.length;
+  {
+    const matriz = new THREE.Matrix4();
+    const sinGiro = new THREE.Quaternion();
+    const color = new THREE.Color();
+    const tenue = new THREE.Color(0xffd166);
+    const intenso = new THREE.Color(0xff3d00);
+    bolidos.forEach(([, latitud, longitud, kt], i) => {
+      const f = fuerza(kt);
+      const radio = 0.007 + 0.035 * f;
+      matriz.compose(puntoGeografico(latitud, longitud), sinGiro, new THREE.Vector3(radio, radio, radio));
+      mallaBolidos.setMatrixAt(i, matriz);
+      mallaBolidos.setColorAt(i, color.copy(tenue).lerp(intenso, f));
+    });
+  }
+  tierra.add(mallaBolidos);
+  const iMayor = bolidos.reduce((mejor, b, i) => ((b[3] ?? 0) > (bolidos[mejor]?.[3] ?? 0) ? i : mejor), 0);
+  const localMayor = bolidos.length ? puntoGeografico(bolidos[iMayor][1], bolidos[iMayor][2], 1.02) : null;
+
   const luna = new THREE.Mesh(esfera(64), new THREE.MeshStandardMaterial({ map: textura('luna.jpg'), roughness: 1, metalness: 0 }));
+  luna.visible = Boolean(vuelo);
   escena.add(luna);
 
-  const semilla = [...String(datos.id_neo)].reduce((h, c) => Math.imul(h ^ c.charCodeAt(0), 16777619), 2166136261);
+  const semilla = [...String(vuelo?.designacion ?? '')].reduce((h, c) => Math.imul(h ^ c.charCodeAt(0), 16777619), 2166136261);
   const asteroide = new THREE.Mesh(geometriaRoca(semilla), new THREE.MeshStandardMaterial({
     color: 0x8a8178, roughness: 1, metalness: 0, flatShading: true,
   }));
+  asteroide.visible = Boolean(vuelo);
   const ejeGiro = new THREE.Vector3(0.3, 0.2, 1).normalize();
   escena.add(asteroide);
 
@@ -248,27 +333,34 @@ async function iniciar() {
   const luzSol = new THREE.DirectionalLight(0xffffff, 3);
   escena.add(luzSol, new THREE.AmbientLight(0xffffff, 0.04));
 
-  // Trayectorias
-  const vectores = (lista) => lista.map(([x, y, z]) => new THREE.Vector3(x * KM, y * KM, z * KM));
-  const pAsteroide = vectores(datos.asteroide);
-  const pLuna = vectores(datos.luna);
-  const pSol = datos.sol ? vectores(datos.sol) : null;
+  // Trayectorias (solo en sobrevuelos)
+  const vectores = (lista) => (lista ?? []).map(([x, y, z]) => new THREE.Vector3(x * KM, y * KM, z * KM));
+  const pAsteroide = vectores(vuelo?.asteroide);
+  const pLuna = vectores(vuelo?.luna);
+  const pSol = vuelo?.sol ? vectores(vuelo.sol) : null;
   function linea(puntos, color, opacidad) {
     const l = new THREE.Line(new THREE.BufferGeometry().setFromPoints(puntos),
       new THREE.LineBasicMaterial({ color, transparent: true, opacity: opacidad, depthWrite: false }));
     l.frustumCulled = false;
     return l;
   }
-  const rutaAsteroide = linea(pAsteroide, 0xd95926, 0.28);
   const estela = linea(pAsteroide, 0xff8a55, 0.95);
-  escena.add(rutaAsteroide, estela, linea(pLuna, 0xc3c2b7, 0.35));
+  if (vuelo) escena.add(linea(pAsteroide, 0xd95926, 0.28), estela, linea(pLuna, 0xc3c2b7, 0.35));
 
-  const t = datos.t;
+  const t = vuelo?.t ?? [];
   const n = t.length;
   const t0 = t[0];
   const t1 = t[n - 1];
   const iPaso = pAsteroide.reduce((mejor, p, i) => (p.lengthSq() < pAsteroide[mejor].lengthSq() ? i : mejor), 0);
+  // La vista general encuadra la Tierra y el tramo del sobrevuelo a menos de 6 veces la distancia
+  // mínima: en pasos muy cercanos (Apophis) el resto de la trayectoria haría la Tierra invisible.
+  const alcanceGeneral = vuelo ? 6 * vuelo.distancia_km * KM : 0;
+  const puntosGenerales = pAsteroide.filter((p) => p.length() <= alcanceGeneral);
+  const puntosEncuadre = [new THREE.Vector3(), ...(puntosGenerales.length >= 2 ? puntosGenerales : pAsteroide)];
   const centroGeneral = new THREE.Vector3();  // lo calcula encuadrarGeneral()
+  // Tamaños exagerados sin que la Tierra llegue a tocar la trayectoria de un paso muy cercano.
+  const exageracion = vuelo
+    ? THREE.MathUtils.clamp(0.35 * vuelo.distancia_km / R_TIERRA_KM, 1, EXAGERACION_MAX) : 1;
 
   function interpolar(puntos, ms, destino) {
     const f = THREE.MathUtils.clamp((ms - t0) / (t1 - t0), 0, 1) * (n - 1);
@@ -277,61 +369,102 @@ async function iniciar() {
   }
 
   // Ficha
-  $('#nombre').textContent = datos.nombre;
-  $('#fecha-paso').textContent = fechaUTC(datos.fecha_ms);
-  $('#distancia-min').textContent = `${numero.format(datos.distancia_km)} km (${(datos.distancia_km / DL_KM).toFixed(2)} DL)`;
-  $('#diametro').textContent = `≈ ${numero.format(datos.diametro_m)} m`;
-  $('#clasificacion').textContent = datos.peligroso ? 'Potencialmente peligroso' : 'No peligroso';
+  function llenarFicha(tipoFicha, nombre, filas, nota) {
+    $('#tipo-ficha').textContent = tipoFicha;
+    $('#nombre').textContent = nombre;
+    $('#datos-ficha').replaceChildren(...filas.flatMap(([termino, valor]) => {
+      const dt = document.createElement('dt');
+      const dd = document.createElement('dd');
+      dt.textContent = termino;
+      dd.textContent = valor;
+      return [dt, dd];
+    }));
+    $('#nota-ficha').textContent = nota ?? '';
+    $('#nota-ficha').hidden = !nota;
+  }
+  if (vuelo) {
+    const nota = vuelo.distancia_km < R_GEO_KM ? 'Pasará más cerca que los satélites geoestacionarios.'
+      : vuelo.distancia_km < DL_KM ? 'Pasará más cerca que la Luna.' : null;
+    llenarFicha(vuelo.tipo === 'evento' ? 'Gran acercamiento' : 'Sobrevuelo', vuelo.nombre, [
+      ['Máxima aproximación', fechaUTC(vuelo.fecha_ms)],
+      ['Distancia mínima', `${numero.format(vuelo.distancia_km)} km (${(vuelo.distancia_km / DL_KM).toFixed(2)} DL)`],
+      ['Velocidad', `${vuelo.velocidad_km_s.toFixed(1)} km/s`],
+      ['Diámetro', `≈ ${numero.format(vuelo.diametro_m)} m${vuelo.diametro_estimado ? ' (estimado)' : ''}`],
+      ['Clasificación', vuelo.peligroso ? 'Potencialmente peligroso' : 'No peligroso'],
+    ], nota);
+  } else {
+    const mayor = bolidos[iMayor];
+    const anios = bolidos.map((b) => new Date(b[0]).getUTCFullYear());
+    llenarFicha('CNEOS · JPL', `${numero.format(bolidos.length)} bólidos registrados`, bolidos.length ? [
+      ['Periodo', `${Math.min(...anios)}–${Math.max(...anios)}`],
+      ['Mayor', `${numero.format(mayor[3])} kt · ${fechaUTC(mayor[0]).slice(0, 10)}`],
+    ] : [], 'Rocas que se desintegraron en la atmósfera. Tamaño y color indican la energía; pasa el cursor o toca un punto.');
+  }
 
   // Etiquetas HTML que siguen a los cuerpos, en orden de prioridad (si se tapan, gana la primera).
   const etiquetas = [];
-  function etiqueta(texto, clase, posicion, cuerpo = null) {
+  function etiqueta(texto, clase, posicion, cuerpo = null, activa = () => true) {
     const el = document.createElement('div');
     el.className = `etiqueta ${clase}`;
     el.textContent = texto;
     $('#etiquetas').append(el);
-    etiquetas.push({ el, posicion, cuerpo });
+    etiquetas.push({ el, posicion, cuerpo, activa });
   }
 
   // Estado
-  const posiciones = { tierra: new THREE.Vector3(), luna: new THREE.Vector3(), asteroide: new THREE.Vector3(), sol: new THREE.Vector3(1e5, 0, 0) };
-  let exagerado = true;
-  let seguir = 'general';
-  let tiempo = t0;
+  const posiciones = { tierra: new THREE.Vector3(), luna: new THREE.Vector3(), asteroide: new THREE.Vector3(), sol: new THREE.Vector3() };
+  const posicionMayor = new THREE.Vector3();
+  let exagerado = Boolean(vuelo);
+  let seguir = vuelo ? 'general' : 'tierra';
+  let tiempo = vuelo ? t[Math.max(0, pAsteroide.findIndex((p) => p.length() <= alcanceGeneral))] : Date.now();
   let reproduciendo = true;
+  if (!vuelo) $('#velocidad').value = '600';
   let velocidad = Number($('#velocidad').value);
 
   function radioVisual(cuerpo) {
-    if (cuerpo === 'tierra') return R_TIERRA_KM * KM * (exagerado ? EXAGERACION : 1);
-    if (cuerpo === 'luna') return R_LUNA_KM * KM * (exagerado ? EXAGERACION : 1);
+    const factor = exagerado ? exageracion : 1;
+    if (cuerpo === 'tierra') return R_TIERRA_KM * KM * factor;
+    if (cuerpo === 'luna') return R_LUNA_KM * KM * factor;
     if (cuerpo === 'sol') return R_SOL_KM * KM;
-    if (cuerpo === 'asteroide') return exagerado ? R_ASTEROIDE_EXAGERADO : (datos.diametro_m / 2000) * KM;
+    if (cuerpo === 'asteroide') {
+      return exagerado ? 0.2 * R_TIERRA_KM * KM * exageracion : (vuelo.diametro_m / 2000) * KM;
+    }
     return 0;
   }
+  const verOrbita = (radioKm) => () => $('#ver-orbitas').checked && radioKm * KM > radioVisual('tierra') * 1.02;
 
-  etiqueta(datos.nombre, 'asteroide', posiciones.asteroide, 'asteroide');
+  if (vuelo) etiqueta(vuelo.nombre, 'asteroide', posiciones.asteroide, 'asteroide');
   etiqueta('Tierra', 'tierra', posiciones.tierra, 'tierra');
-  etiqueta('Luna', 'luna', posiciones.luna, 'luna');
-  etiqueta('Máxima aproximación', 'paso', pAsteroide[iPaso]);
+  if (vuelo) {
+    etiqueta('Luna', 'luna', posiciones.luna, 'luna');
+    etiqueta('Máxima aproximación', 'paso', pAsteroide[iPaso]);
+  }
+  if (localMayor) {
+    etiqueta(`Mayor bólido · ${new Date(bolidos[iMayor][0]).getUTCFullYear()} · ${numero.format(bolidos[iMayor][3])} kt`,
+      'bolido', posicionMayor, null, () => mallaBolidos.visible);
+  }
+  etiqueta('Órbita geoestacionaria', 'orbita', puntoGeo, null, verOrbita(R_GEO_KM));
+  etiqueta('Órbita de la ISS', 'orbita', puntoIss, null, verOrbita(R_ISS_KM));
   etiqueta('Sol', 'luna', posiciones.sol, 'sol');
 
   function aplicarEscala() {
     tierra.scale.setScalar(radioVisual('tierra'));
     luna.scale.setScalar(radioVisual('luna'));
-    asteroide.scale.setScalar(radioVisual('asteroide'));
+    if (vuelo) asteroide.scale.setScalar(radioVisual('asteroide'));
+    anilloGeo.visible = verOrbita(R_GEO_KM)();
+    anilloIss.visible = verOrbita(R_ISS_KM)();
   }
 
   /**
-   * Vista general mirando desde `direccion`: centra la Tierra y la trayectoria en los ejes de la
+   * Vista general mirando desde `direccion`: centra la Tierra y el sobrevuelo en los ejes de la
    * cámara y devuelve la distancia a la que caben en la zona libre de paneles.
    */
   function encuadrarGeneral(direccion) {
     const orientacion = new THREE.Matrix4().lookAt(direccion, new THREE.Vector3(), camara.up);
     const derecha = new THREE.Vector3().setFromMatrixColumn(orientacion, 0);
     const arriba = new THREE.Vector3().setFromMatrixColumn(orientacion, 1);
-    const puntos = [new THREE.Vector3(), ...pAsteroide];
     const rango = (eje) => {
-      const valores = puntos.map((p) => p.dot(eje));
+      const valores = puntosEncuadre.map((p) => p.dot(eje));
       return [Math.min(...valores), Math.max(...valores)];
     };
     const [x0, x1] = rango(derecha);
@@ -344,21 +477,28 @@ async function iniciar() {
       (x1 - x0) / 2 / (tanVertical * camara.aspect)) + (z1 - z0) / 2;
   }
 
+  function direccionInicial() {
+    const direccion = new THREE.Vector3();
+    if (vuelo) {
+      // Perpendicular al plano de la trayectoria, desde el lado norte.
+      direccion.crossVectors(pAsteroide[0], pAsteroide[n - 1]);
+      if (direccion.z < 0) direccion.negate();
+      if (direccion.lengthSq() === 0) direccion.set(0, -1, 1);
+      return direccion.normalize().add(new THREE.Vector3(0.2, -0.3, 0)).normalize();
+    }
+    // Bólidos: desde el lado de día, un poco por encima del ecuador.
+    return direccion.copy(posiciones.sol).normalize().add(new THREE.Vector3(0, 0, 0.35)).normalize();
+  }
+
   function enfocar(cuerpo) {
     seguir = cuerpo;
     document.querySelectorAll('[data-seguir]').forEach((b) => b.classList.toggle('activo', b.dataset.seguir === cuerpo));
     const objetivo = cuerpo === 'general' ? centroGeneral : posiciones[cuerpo];
     const direccion = camara.position.clone().sub(controles.target);
-    if (direccion.lengthSq() === 0) {
-      // Primera vista: perpendicular al plano de la trayectoria, desde el lado norte.
-      direccion.crossVectors(pAsteroide[0], pAsteroide[n - 1]);
-      if (direccion.z < 0) direccion.negate();
-      if (direccion.lengthSq() === 0) direccion.set(0, -1, 1);
-      direccion.normalize().add(new THREE.Vector3(0.2, -0.3, 0));
-    }
+    if (direccion.lengthSq() === 0) direccion.copy(direccionInicial());
     direccion.normalize();
-    const distancia = cuerpo === 'general' ? encuadrarGeneral(direccion)
-      : radioVisual(cuerpo) * (cuerpo === 'asteroide' ? 25 : 5);
+    const factor = { asteroide: 25, tierra: vuelo ? 5 : 3.2, luna: 5 }[cuerpo];
+    const distancia = cuerpo === 'general' ? encuadrarGeneral(direccion) : radioVisual(cuerpo) * factor;
     controles.target.copy(objetivo);
     camara.position.copy(objetivo).addScaledVector(direccion, distancia);
     controles.minDistance = radioVisual(cuerpo === 'general' ? 'tierra' : cuerpo) * 1.5;
@@ -371,14 +511,27 @@ async function iniciar() {
   }
 
   // Controles de la interfaz
+  if (vuelo) {
+    $('#texto-exagerar').textContent = `Tamaños exagerados (×${Math.round(exageracion)})`;
+    $('#control-exagerar').hidden = exageracion < 1.5;
+  } else {
+    $('#botones-seguir').hidden = true;
+    $('#control-exagerar').hidden = true;
+    $('#barra').hidden = true;
+  }
   document.querySelectorAll('[data-seguir]').forEach((b) => b.addEventListener('click', () => enfocar(b.dataset.seguir)));
   $('#exagerar').addEventListener('change', (e) => {
     exagerado = e.target.checked;
     aplicarEscala();
     enfocar(seguir);
   });
+  $('#ver-bolidos').addEventListener('change', (e) => {
+    mallaBolidos.visible = e.target.checked;
+    if (!e.target.checked) $('#tooltip').hidden = true;
+  });
+  $('#ver-orbitas').addEventListener('change', aplicarEscala);
   $('#reproducir').addEventListener('click', () => {
-    if (!reproduciendo && tiempo >= t1) tiempo = t0;
+    if (vuelo && !reproduciendo && tiempo >= t1) tiempo = t0;
     ponerReproduccion(!reproduciendo);
   });
   $('#velocidad').addEventListener('change', (e) => { velocidad = Number(e.target.value); });
@@ -387,6 +540,55 @@ async function iniciar() {
   barra.addEventListener('pointerdown', () => { arrastrando = true; });
   window.addEventListener('pointerup', () => { arrastrando = false; });
   barra.addEventListener('input', () => { tiempo = t0 + (barra.value / 1000) * (t1 - t0); });
+
+  // Información de un bólido al pasar el cursor (ratón) o al tocarlo (pantalla táctil).
+  const raycaster = new THREE.Raycaster();
+  const puntero = new THREE.Vector2();
+  const tooltip = $('#tooltip');
+  function bolidoEn(evento) {
+    if (!mallaBolidos.visible || !bolidos.length) return null;
+    const r = lienzo.getBoundingClientRect();
+    puntero.set(((evento.clientX - r.left) / r.width) * 2 - 1, -((evento.clientY - r.top) / r.height) * 2 + 1);
+    raycaster.setFromCamera(puntero, camara);
+    const [primero] = raycaster.intersectObjects([tierra, mallaBolidos], false);
+    return primero?.object === mallaBolidos ? primero.instanceId : null;
+  }
+  function mostrarBolido(i, evento) {
+    if (i === null) {
+      tooltip.hidden = true;
+      return;
+    }
+    const [ms, latitud, longitud, kt, altitud, velocidadBolido] = bolidos[i];
+    const lineas = [
+      fechaUTC(ms),
+      kt === null ? 'Energía no estimada'
+        : `${kt < 10 ? kt.toFixed(2) : numero.format(kt)} kt${kt >= 1 ? ` · ≈ ${(kt / HIROSHIMA_KT).toFixed(1)}× Hiroshima` : ''}`,
+      `${Math.abs(latitud).toFixed(1)}° ${latitud >= 0 ? 'N' : 'S'}, ${Math.abs(longitud).toFixed(1)}° ${longitud >= 0 ? 'E' : 'O'}`,
+      altitud === null ? null : `Estalló a ${altitud.toFixed(1)} km de altura`,
+      velocidadBolido === null ? null : `${velocidadBolido.toFixed(1)} km/s`,
+    ].filter(Boolean);
+    tooltip.replaceChildren(...lineas.map((texto) => {
+      const div = document.createElement('div');
+      div.textContent = texto;
+      return div;
+    }));
+    tooltip.hidden = false;
+    const x = Math.min(evento.clientX + 14, window.innerWidth - tooltip.offsetWidth - 8);
+    const y = Math.min(evento.clientY + 14, window.innerHeight - tooltip.offsetHeight - 8);
+    tooltip.style.transform = `translate(${x}px, ${y}px)`;
+  }
+  let inicioToque = null;
+  lienzo.addEventListener('pointermove', (e) => {
+    if (e.pointerType === 'mouse' && e.buttons === 0) mostrarBolido(bolidoEn(e), e);
+  });
+  lienzo.addEventListener('pointerdown', (e) => { inicioToque = { x: e.clientX, y: e.clientY }; });
+  lienzo.addEventListener('pointerup', (e) => {
+    if (inicioToque && Math.hypot(e.clientX - inicioToque.x, e.clientY - inicioToque.y) < 5) {
+      mostrarBolido(bolidoEn(e), e);
+    }
+    inicioToque = null;
+  });
+  lienzo.addEventListener('pointerleave', () => { tooltip.hidden = true; });
 
   // Cada fotograma
   const delta = new THREE.Vector3();
@@ -397,42 +599,48 @@ async function iniciar() {
   const proyeccion = new THREE.Vector3();
 
   function actualizar() {
-    interpolar(pAsteroide, tiempo, posiciones.asteroide);
-    interpolar(pLuna, tiempo, posiciones.luna);
     if (pSol) interpolar(pSol, tiempo, posiciones.sol);
-
+    else posicionSol(tiempo, posiciones.sol);
     const dirSol = posiciones.sol.clone().normalize();
     uniformesTierra.dirSol.value.copy(dirSol);
     luzSol.position.copy(dirSol).multiplyScalar(1000);
     sol.position.copy(posiciones.sol);
 
     tierra.rotation.z = anguloSideral(tiempo);
-    luna.position.copy(posiciones.luna);
-    // Rotación síncrona: la cara visible (longitud 0) mira siempre a la Tierra.
-    ejeX.copy(posiciones.luna).negate().normalize();
-    ejeY.crossVectors(NORTE_ECLIPTICA, ejeX).normalize();
-    ejeZ.crossVectors(ejeX, ejeY);
-    luna.quaternion.setFromRotationMatrix(base.makeBasis(ejeX, ejeY, ejeZ));
-    asteroide.position.copy(posiciones.asteroide);
-    asteroide.quaternion.setFromAxisAngle(ejeGiro, (tiempo / 3600000) * (Math.PI / 3));
+    ejeTierra.updateMatrixWorld(true);
+    if (localMayor) posicionMayor.copy(localMayor).applyMatrix4(tierra.matrixWorld);
 
-    const f = THREE.MathUtils.clamp((tiempo - t0) / (t1 - t0), 0, 1) * (n - 1);
-    const i = Math.min(Math.floor(f), n - 2);
-    estela.geometry.setDrawRange(0, i + 1);
+    if (vuelo) {
+      interpolar(pAsteroide, tiempo, posiciones.asteroide);
+      interpolar(pLuna, tiempo, posiciones.luna);
+      luna.position.copy(posiciones.luna);
+      // Rotación síncrona: la cara visible (longitud 0) mira siempre a la Tierra.
+      ejeX.copy(posiciones.luna).negate().normalize();
+      ejeY.crossVectors(NORTE_ECLIPTICA, ejeX).normalize();
+      ejeZ.crossVectors(ejeX, ejeY);
+      luna.quaternion.setFromRotationMatrix(base.makeBasis(ejeX, ejeY, ejeZ));
+      asteroide.position.copy(posiciones.asteroide);
+      asteroide.quaternion.setFromAxisAngle(ejeGiro, (tiempo / 3600000) * (Math.PI / 3));
+
+      const f = THREE.MathUtils.clamp((tiempo - t0) / (t1 - t0), 0, 1) * (n - 1);
+      const i = Math.min(Math.floor(f), n - 2);
+      estela.geometry.setDrawRange(0, i + 1);
+      if (!arrastrando) barra.value = Math.round(((tiempo - t0) / (t1 - t0)) * 1000);
+      const distanciaKm = posiciones.asteroide.length() / KM;
+      const rapidez = pAsteroide[i + 1].distanceTo(pAsteroide[i]) / KM / ((t[i + 1] - t[i]) / 1000);
+      $('#cuenta').textContent = cuentaAtras(tiempo - vuelo.fecha_ms);
+      $('#distancia').textContent = `A ${numero.format(distanciaKm)} km de la Tierra (${(distanciaKm / DL_KM).toFixed(2)} DL)`;
+      $('#rapidez').textContent = `${rapidez.toFixed(1)} km/s respecto a la Tierra`;
+    } else {
+      $('#cuenta').textContent = 'La Tierra gira y se ilumina según la hora indicada';
+    }
+    $('#ahora').textContent = fechaUTC(tiempo);
 
     // Seguir al cuerpo elegido trasladando cámara y objetivo juntos.
     const objetivo = seguir === 'general' ? centroGeneral : posiciones[seguir];
     delta.subVectors(objetivo, controles.target);
     controles.target.add(delta);
     camara.position.add(delta);
-
-    if (!arrastrando) barra.value = Math.round(((tiempo - t0) / (t1 - t0)) * 1000);
-    const distanciaKm = posiciones.asteroide.length() / KM;
-    const rapidez = pAsteroide[i + 1].distanceTo(pAsteroide[i]) / KM / ((t[i + 1] - t[i]) / 1000);
-    $('#ahora').textContent = fechaUTC(tiempo);
-    $('#cuenta').textContent = cuentaAtras(tiempo - datos.fecha_ms);
-    $('#distancia').textContent = `A ${numero.format(distanciaKm)} km de la Tierra (${(distanciaKm / DL_KM).toFixed(2)} DL)`;
-    $('#rapidez').textContent = `${rapidez.toFixed(1)} km/s respecto a la Tierra`;
   }
 
   /** ¿La Tierra o la Luna tapan el punto visto desde la cámara? */
@@ -442,7 +650,7 @@ async function iniciar() {
     rayo.origin.copy(camara.position);
     rayo.direction.subVectors(posicion, camara.position).normalize();
     const distancia = camara.position.distanceTo(posicion);
-    return ['tierra', 'luna'].some((cuerpo) => cuerpo !== propio
+    return ['tierra', 'luna'].some((cuerpo) => cuerpo !== propio && (cuerpo === 'tierra' || luna.visible)
       && rayo.intersectSphere(new THREE.Sphere(posiciones[cuerpo], radioVisual(cuerpo)), choque)
       && camara.position.distanceTo(choque) < distancia);
   }
@@ -451,12 +659,12 @@ async function iniciar() {
     const { clientWidth: ancho, clientHeight: alto } = lienzo;
     const pixelesPorUnidad = alto / (2 * Math.tan(THREE.MathUtils.degToRad(camara.fov / 2)));
     const colocadas = [];
-    for (const { el, posicion, cuerpo } of etiquetas) {
+    for (const { el, posicion, cuerpo, activa } of etiquetas) {
       proyeccion.copy(posicion).project(camara);
       const radioPx = (radioVisual(cuerpo) / camara.position.distanceTo(posicion)) * pixelesPorUnidad;
       const x = ((proyeccion.x + 1) / 2) * ancho + (radioPx > 6 ? radioPx : 0);
       const y = ((1 - proyeccion.y) / 2) * alto;
-      const visible = proyeccion.z < 1 && Math.abs(proyeccion.x) < 1.05 && Math.abs(proyeccion.y) < 1.05
+      const visible = activa() && proyeccion.z < 1 && Math.abs(proyeccion.x) < 1.05 && Math.abs(proyeccion.y) < 1.05
         && !colocadas.some((p) => Math.abs(p.x - x) < 70 && Math.abs(p.y - y) < 16)
         && !tapado(posicion, cuerpo);
       el.style.display = visible ? '' : 'none';
@@ -473,14 +681,14 @@ async function iniciar() {
   aplicarEscala();
   actualizar();
   ajustar();  // con los paneles visibles y sus textos ya escritos, para medir la zona libre
-  enfocar('general');
+  enfocar(seguir);
 
   const reloj = new THREE.Clock();
   renderer.setAnimationLoop(() => {
     const dt = Math.min(reloj.getDelta(), 0.1);
     if (reproduciendo) {
       tiempo += dt * 1000 * velocidad;
-      if (tiempo >= t1) {
+      if (vuelo && tiempo >= t1) {
         tiempo = t1;
         ponerReproduccion(false);
       }

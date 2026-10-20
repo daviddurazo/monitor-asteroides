@@ -56,6 +56,44 @@ CREATE TABLE trayectorias (
     CONSTRAINT fk_trayectoria_acercamiento FOREIGN KEY (id_acercamiento) REFERENCES acercamientos (id)
 );
 
+-- Eventos: grandes acercamientos de los próximos años (API CAD del JPL), independientes de NeoWs.
+CREATE TABLE eventos (
+    id                 INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    designacion        VARCHAR(30)  NOT NULL COMMENT 'Designación del JPL: número o provisional',
+    nombre             VARCHAR(100) NOT NULL,
+    fecha_acercamiento DATETIME     NOT NULL COMMENT 'TDB (~UTC + 69 s)',
+    distancia_km       DOUBLE       NOT NULL COMMENT 'Distancia nominal al centro de la Tierra',
+    velocidad_km_s     DOUBLE       NOT NULL,
+    magnitud_absoluta  DOUBLE       NOT NULL,
+    diametro_m         DOUBLE       NOT NULL,
+    diametro_estimado  BOOLEAN      NOT NULL COMMENT 'TRUE si se calculó con H y albedo 0.14',
+    UNIQUE KEY uq_evento (designacion, fecha_acercamiento)
+);
+
+-- Trayectorias de los eventos: misma estructura que trayectorias.
+CREATE TABLE trayectorias_eventos (
+    id_evento        INT UNSIGNED NOT NULL,
+    cuerpo           ENUM('asteroide', 'luna', 'sol') NOT NULL,
+    instante         DATETIME NOT NULL COMMENT 'TDB (~UTC + 69s)',
+    x_km             DOUBLE NOT NULL COMMENT 'Plano de la eclíptica, centro de la Tierra',
+    y_km             DOUBLE NOT NULL,
+    z_km             DOUBLE NOT NULL,
+    PRIMARY KEY (id_evento, cuerpo, instante),
+    CONSTRAINT fk_trayectoria_evento FOREIGN KEY (id_evento) REFERENCES eventos (id)
+);
+
+-- Bólidos: rocas que se desintegraron en la atmósfera (API Fireball de CNEOS).
+CREATE TABLE bolidos (
+    fecha              DATETIME NOT NULL COMMENT 'Instante de máximo brillo, UTC',
+    latitud            DOUBLE   NOT NULL COMMENT 'Grados, positivo al norte',
+    longitud           DOUBLE   NOT NULL COMMENT 'Grados, positivo al este',
+    energia_impacto_kt DOUBLE   NULL COMMENT 'Energía total estimada, kilotones de TNT',
+    energia_radiada_j  DOUBLE   NOT NULL COMMENT 'Energía óptica radiada, julios',
+    altitud_km         DOUBLE   NULL,
+    velocidad_km_s     DOUBLE   NULL,
+    PRIMARY KEY (fecha, latitud, longitud)
+);
+
 -- Vista que consume el dashboard: une cada acercamiento con su asteroide.
 CREATE VIEW vista_acercamientos AS
 SELECT c.id, c.id_neo, a.nombre, c.fecha_acercamiento, c.velocidad_km_s,

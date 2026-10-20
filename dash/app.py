@@ -14,6 +14,7 @@ from dash import Dash, Input, Output, State, dash_table, dcc, html, no_update
 from flask import jsonify, send_from_directory
 
 INGESTOR_URL = os.environ.get("INGESTOR_URL", "http://ingestor:8000")
+DL_KM = 384_400
 CARPETA_SIMULADOR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "simulador")
 
 # Paleta (modo oscuro): dos categorías + tintas neutras.
@@ -84,14 +85,33 @@ def milisegundos(fecha):
     return int(fecha.replace(tzinfo=timezone.utc).timestamp() * 1000)
 
 
-def leer_trayectoria(id_acercamiento):
-    """Datos del sobrevuelo para el simulador 3D: ficha del paso y posiciones en km por cuerpo."""
-    ficha = consultar("""
-        SELECT id_neo, nombre, fecha_acercamiento, distancia_km, diametro_medio_m, es_peligroso
+def nulo(valor):
+    """NaN de pandas -> None, para que el JSON sea válido."""
+    return None if pd.isna(valor) else float(valor)
+
+
+# Por cada tipo de sobrevuelo del simulador: consulta de la ficha, tabla de posiciones y su FK.
+SOBREVUELOS = {
+    "acercamiento": ("""
+        SELECT id_neo AS designacion, nombre, fecha_acercamiento, distancia_km, velocidad_km_s,
+               diametro_medio_m AS diametro_m, FALSE AS diametro_estimado, es_peligroso
         FROM vista_acercamientos WHERE id = %s
-    """, (id_acercamiento,))
-    datos = consultar("SELECT cuerpo, instante, x_km, y_km, z_km FROM trayectorias "
-                      "WHERE id_acercamiento = %s ORDER BY instante", (id_acercamiento,))
+    """, "trayectorias", "id_acercamiento"),
+    # Todos los eventos son potencialmente peligrosos: H <= 22 y pasan a menos de 0.05 UA.
+    "evento": ("""
+        SELECT designacion, nombre, fecha_acercamiento, distancia_km, velocidad_km_s,
+               diametro_m, diametro_estimado, TRUE AS es_peligroso
+        FROM eventos WHERE id = %s
+    """, "trayectorias_eventos", "id_evento"),
+}
+
+
+def leer_trayectoria(tipo, id_sobrevuelo):
+    """Datos del sobrevuelo para el simulador 3D: ficha del paso y posiciones en km por cuerpo."""
+    sql_ficha, tabla_posiciones, columna = SOBREVUELOS[tipo]
+    ficha = consultar(sql_ficha, (id_sobrevuelo,))
+    datos = consultar(f"SELECT cuerpo, instante, x_km, y_km, z_km FROM {tabla_posiciones} "
+                      f"WHERE {columna} = %s ORDER BY instante", (id_sobrevuelo,))
     if ficha.empty or datos.empty:
         return None
     limpiar_nombres(ficha)
@@ -108,17 +128,28 @@ def leer_trayectoria(id_acercamiento):
         return None
     paso = ficha.iloc[0]
     return {
-        "id_neo": paso["id_neo"],
+        "tipo": tipo,
+        "designacion": paso["designacion"],
         "nombre": paso["nombre"],
         "fecha_ms": milisegundos(paso["fecha_acercamiento"]),
         "distancia_km": float(paso["distancia_km"]),
-        "diametro_m": float(paso["diametro_medio_m"]),
+        "velocidad_km_s": float(paso["velocidad_km_s"]),
+        "diametro_m": float(paso["diametro_m"]),
+        "diametro_estimado": bool(paso["diametro_estimado"]),
         "peligroso": bool(paso["es_peligroso"]),
         "t": [milisegundos(instante) for instante in tabla.index],
         "asteroide": posiciones("asteroide"),
         "luna": posiciones("luna"),
         "sol": posiciones("sol"),
     }
+
+
+def leer_bolidos():
+    """Bólidos para el globo: [ms, latitud, longitud, kilotones, altitud_km, velocidad_km_s]."""
+    datos = consultar("SELECT fecha, latitud, longitud, energia_impacto_kt, altitud_km, "
+                      "velocidad_km_s FROM bolidos ORDER BY fecha")
+    return [[milisegundos(f.fecha), f.latitud, f.longitud, nulo(f.energia_impacto_kt),
+             nulo(f.altitud_km), nulo(f.velocidad_km_s)] for f in datos.itertuples()]
 
 
 def filtrar(datos, periodo, solo_peligrosos):
@@ -363,7 +394,8 @@ app.layout = html.Div([
     html.Header([
         html.Div([
             html.H1("Monitor de asteroides cercanos a la Tierra"),
-            html.P("API NeoWs de la NASA → contenedor Ubuntu → MySQL → Dash · horas en UTC"),
+            html.P("APIs de la NASA y el JPL (NeoWs, Horizons, CAD, Fireball) → contenedor Ubuntu "
+                   "→ MySQL → Dash · horas en UTC"),
         ]),
         html.Div([
             html.Button("Sincronizar con la NASA", id="sincronizar", className="boton"),
@@ -372,15 +404,23 @@ app.layout = html.Div([
         ], className="acciones"),
     ], className="cabecera"),
     html.Section(id="proximo", className="proximo"),
-    panel("Simulador del sobrevuelo",
-          "Posiciones reales de JPL Horizons para los pasos más cercanos de los próximos 7 días. "
+    panel("Simulador 3D",
+          "Sobrevuelos con posiciones reales de JPL Horizons (los más cercanos de esta semana o los "
+          "de asteroides grandes en los próximos 10 años) y bólidos registrados en la atmósfera. "
           "Arrastra para girar, rueda para acercar. La Tierra y la Luna usan texturas de la NASA; "
           "el asteroide es una roca genérica.",
-          html.Div([dcc.Dropdown(id="selector-trayectoria", clearable=False, searchable=False,
-                                 placeholder="Sin trayectorias todavía",
-                                 className="selector"),
-                    html.Iframe(id="simulador", src="/simulador/", className="simulador",
-                                title="Simulador 3D del sobrevuelo")])),
+          html.Div([
+              html.Div([
+                  dcc.RadioItems(id="modo-simulador", inline=True, value="semana",
+                                 className="segmentado",
+                                 options=[{"label": "Esta semana", "value": "semana"},
+                                          {"label": "Grandes acercamientos", "value": "eventos"},
+                                          {"label": "Bólidos", "value": "bolidos"}]),
+                  dcc.Dropdown(id="selector-trayectoria", clearable=False, searchable=False,
+                               placeholder="Sin trayectorias todavía", className="selector"),
+              ], className="controles-simulador"),
+              html.Iframe(id="simulador", src="/simulador/", className="simulador",
+                          title="Simulador 3D")])),
     html.Div([
         dcc.RadioItems(id="periodo", inline=True, value="todo", className="segmentado",
                        options=[{"label": "Todo lo guardado", "value": "todo"},
@@ -465,50 +505,100 @@ def sincronizar(_clicks):
     return " · ".join(partes), datetime.now(timezone.utc).isoformat()
 
 
+def opciones_semana():
+    datos = consultar("""
+        SELECT v.id, v.nombre, v.fecha_acercamiento, v.distancia_lunar
+        FROM vista_acercamientos v
+        WHERE EXISTS (SELECT 1 FROM trayectorias t WHERE t.id_acercamiento = v.id)
+        ORDER BY v.fecha_acercamiento
+    """)
+    if datos.empty:
+        return []
+    limpiar_nombres(datos)
+    return [{"label": f"{f.nombre} · {f.fecha_acercamiento:%d/%m %H:%M} UTC · "
+                      f"{f.distancia_lunar:.2f} DL", "value": f"acercamiento-{f.id}"}
+            for f in datos.itertuples()]
+
+
+def opciones_eventos():
+    datos = consultar("""
+        SELECT e.id, e.nombre, e.fecha_acercamiento, e.distancia_km, e.diametro_m
+        FROM eventos e
+        WHERE e.fecha_acercamiento >= UTC_TIMESTAMP()
+          AND EXISTS (SELECT 1 FROM trayectorias_eventos t WHERE t.id_evento = e.id)
+        ORDER BY e.distancia_km
+    """)
+    if datos.empty:
+        return []
+    limpiar_nombres(datos)
+    return [{"label": f"{f.nombre} · {f.fecha_acercamiento:%d/%m/%Y} · "
+                      f"{f.distancia_km / DL_KM:.2f} DL · ≈{f.diametro_m:,.0f} m",
+             "value": f"evento-{f.id}"}
+            for f in datos.itertuples()]
+
+
 @app.callback(
     Output("selector-trayectoria", "options"), Output("selector-trayectoria", "value"),
-    Input("reloj", "n_intervals"), Input("ultima-sync", "data"),
+    Output("selector-trayectoria", "style"),
+    Input("modo-simulador", "value"), Input("reloj", "n_intervals"), Input("ultima-sync", "data"),
     State("selector-trayectoria", "value"),
 )
-def opciones_trayectoria(_intervalo, _sync, actual):
+def opciones_trayectoria(modo, _intervalo, _sync, actual):
+    if modo == "bolidos":
+        return [], (no_update if actual is None else None), {"display": "none"}
     try:
-        datos = consultar("""
-            SELECT v.id, v.nombre, v.fecha_acercamiento, v.distancia_lunar
-            FROM vista_acercamientos v
-            WHERE EXISTS (SELECT 1 FROM trayectorias t WHERE t.id_acercamiento = v.id)
-            ORDER BY v.fecha_acercamiento
-        """)
+        opciones = opciones_eventos() if modo == "eventos" else opciones_semana()
     except mysql.connector.Error:
         logging.exception("No se pudieron leer las trayectorias")
-        return no_update, no_update
-    if datos.empty:
-        return [], None
-    limpiar_nombres(datos)
-    opciones = [{"label": f"{f.nombre} · {f.fecha_acercamiento:%d/%m %H:%M} UTC · "
-                          f"{f.distancia_lunar:.2f} DL", "value": f.id}
-                for f in datos.itertuples()]
-    ids = [o["value"] for o in opciones]
+        return no_update, no_update, no_update
+    valores = [o["value"] for o in opciones]
     # Reasignar el mismo valor reiniciaría la animación cada 30 s.
-    return opciones, no_update if actual in ids else ids[0]
+    if actual in valores or (not valores and actual is None):
+        return opciones, no_update, {}
+    return opciones, (valores[0] if valores else None), {}
 
 
-@app.callback(Output("simulador", "src"), Input("selector-trayectoria", "value"))
-def mostrar_trayectoria(id_acercamiento):
-    return "/simulador/" if id_acercamiento is None else f"/simulador/?id={id_acercamiento}"
+@app.callback(
+    Output("simulador", "src"),
+    Input("modo-simulador", "value"), Input("selector-trayectoria", "value"),
+    State("simulador", "src"),
+)
+def mostrar_trayectoria(modo, valor, actual):
+    if modo == "bolidos":
+        src = "/simulador/?vista=bolidos"
+    elif valor is None:
+        src = "/simulador/"
+    else:
+        tipo, id_sobrevuelo = valor.split("-")
+        if (tipo == "evento") != (modo == "eventos"):
+            return no_update  # valor del modo anterior; enseguida llega el nuevo
+        src = f"/simulador/?tipo={tipo}&id={id_sobrevuelo}"
+    return no_update if src == actual else src
 
 
 # --------------------------------------------------------------------------- Simulador 3D
 
-@server.route("/api/trayectoria/<int:id_acercamiento>")
-def api_trayectoria(id_acercamiento):
+@server.route("/api/trayectoria/<tipo>/<int:id_sobrevuelo>")
+def api_trayectoria(tipo, id_sobrevuelo):
+    if tipo not in SOBREVUELOS:
+        return jsonify(error="Tipo de sobrevuelo desconocido."), 404
     try:
-        datos = leer_trayectoria(id_acercamiento)
+        datos = leer_trayectoria(tipo, id_sobrevuelo)
     except mysql.connector.Error:
         logging.exception("No se pudo leer la trayectoria")
         return jsonify(error="No se pudo consultar MySQL."), 503
     if datos is None:
-        return jsonify(error="Este acercamiento no tiene trayectoria guardada."), 404
+        return jsonify(error="Este sobrevuelo no tiene trayectoria guardada."), 404
     return jsonify(datos)
+
+
+@server.route("/api/bolidos")
+def api_bolidos():
+    try:
+        return jsonify(leer_bolidos())
+    except mysql.connector.Error:
+        logging.exception("No se pudieron leer los bólidos")
+        return jsonify(error="No se pudo consultar MySQL."), 503
 
 
 @server.route("/simulador/")
