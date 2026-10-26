@@ -46,15 +46,15 @@ PUERTO = int(os.environ.get("PUERTO", "8000"))
 HORIZONS_URL = "https://ssd.jpl.nasa.gov/api/horizons.api"
 JPL_SSD_API = "https://ssd-api.jpl.nasa.gov"
 UA_KM = 149_597_870.7
-TRAYECTORIAS_N = int(os.environ.get("TRAYECTORIAS_N", "5"))
+TRAYECTORIAS_N = int(os.environ.get("TRAYECTORIAS_N", "5")) 
 VENTANA_HORAS = int(os.environ.get("VENTANA_HORAS", "72"))
 PASO_MAX_MINUTOS = int(os.environ.get("PASO_MAX_MINUTOS", "60"))
-# Grandes acercamientos (API CAD): años hacia adelante, distancia máxima y magnitud H máxima
-# (H <= 21 equivale a unos 200 m de diámetro o más).
+#Grandes acercamientos (API CAD): años hacia adelante, distancia máxima y magnitud H máxima
+#(H <= 21 equivale a unos 200 m de diámetro o más).
 EVENTOS_ANIOS = int(os.environ.get("EVENTOS_ANIOS", "10"))
 EVENTOS_DIST_MAX_DL = float(os.environ.get("EVENTOS_DIST_MAX_DL", "5"))
 EVENTOS_H_MAX = float(os.environ.get("EVENTOS_H_MAX", "21"))
-# Cuerpos que acompañan a cada asteroide -> COMMAND de Horizons. El Sol da la luz del simulador.
+#Cuerpos que acompañan a cada asteroide -> COMMAND de Horizons. El Sol da la luz del simulador.
 CUERPOS_FIJOS = {"luna": "301", "sol": "10"}
 CUERPOS_POR_TRAYECTORIA = 1 + len(CUERPOS_FIJOS)
 
